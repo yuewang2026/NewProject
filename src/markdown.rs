@@ -2,8 +2,9 @@
 //!
 //! The export that makes a PPTX greppable, diffable and digestible by an LLM.
 //! Every sentence here is also the reverse pipeline's input dialect: `deckr
-//! build` will read this shape back and route each block to the matching master
-//! placeholder.
+//! build` reads this shape back and routes each block to the matching master
+//! placeholder, which is why the Markdown round-trips rather than merely
+//! documents.
 
 use crate::ir::{Block, BlockContent, Deck, Paragraph, Role, Slide, TextContent};
 
@@ -43,8 +44,8 @@ fn render_slide(out: &mut String, slide: &Slide) {
                 let alt = alt.clone().unwrap_or_else(|| "image".to_string());
                 out.push_str(&format!("![{alt}](media://slide{n})\n\n"));
             }
-            // Phase 0 records that the object is there. Restoring the numbers
-            // behind it lands in 0.4 (`ChartData`).
+            // Charts and diagrams cannot yet be re-authored from Markdown, so
+            // they export as a marker that survives the round trip as itself.
             BlockContent::Chart { .. } => out.push_str("`[chart]`\n\n"),
             BlockContent::Diagram { .. } => out.push_str("`[diagram]`\n\n"),
             BlockContent::Empty => {}
@@ -76,19 +77,58 @@ fn render_text(out: &mut String, role: Role, text: &TextContent) {
         matches!(role, Role::Body | Role::Object) || paragraphs.iter().any(|p| p.level > 0);
 
     for p in paragraphs {
+        let body = if p.is_plain() {
+            p.text.clone()
+        } else {
+            render_inline(p)
+        };
         let indent = "  ".repeat(p.level as usize);
-        for (i, line) in p.text.lines().enumerate() {
-            let line = line.trim();
-            if bulleted {
+        for (i, line) in body.lines().enumerate() {
+            let marker = if bulleted {
                 // Continuation lines of a soft-broken bullet hang in.
-                let marker = if i == 0 { "- " } else { "  " };
-                out.push_str(&format!("{indent}{marker}{line}\n"));
+                if i == 0 { "- " } else { "  " }
             } else {
-                out.push_str(&format!("{line}\n"));
+                ""
+            };
+            let line = line.trim_end();
+            if line.is_empty() {
+                out.push('\n');
+                continue;
             }
+            out.push_str(&format!("{indent}{marker}{line}\n"));
         }
     }
     out.push('\n');
+}
+
+/// One paragraph's text with per-run Markdown emphasis applied.
+///
+/// The nesting order matters: a link sits innermost because Markdown treats it
+/// as part of the visible text, and bold wraps everything so that
+/// `**[label](url)**` renders as intended rather than as a literal.
+fn render_inline(p: &Paragraph) -> String {
+    p.display_runs()
+        .iter()
+        .map(|run| {
+            let mut text = run.text.clone();
+            if let Some(link) = &run.link {
+                text = format!("[{text}]({link})");
+            }
+            if run.underline == Some(true) {
+                text = format!("<u>{text}</u>");
+            }
+            if run.strike == Some(true) {
+                text = format!("~~{text}~~");
+            }
+            if run.italic == Some(true) {
+                text = format!("*{text}*");
+            }
+            if run.bold == Some(true) {
+                text = format!("**{text}**");
+            }
+            text
+        })
+        .collect()
 }
 
 fn render_table(rows: &[Vec<String>]) -> String {
@@ -156,7 +196,7 @@ pub fn role_histogram(deck: &Deck) -> Vec<(Role, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Deck, TextContent};
+    use crate::ir::{Deck, Run, TextContent};
 
     fn text(slide: &Slide) -> Option<&TextContent> {
         slide.blocks.first().and_then(|b| b.as_text())
@@ -171,24 +211,15 @@ mod tests {
                     Block {
                         role: Role::Title,
                         content: BlockContent::Text(TextContent {
-                            paragraphs: vec![Paragraph {
-                                level: 0,
-                                text: "Quarterly Review".into(),
-                            }],
+                            paragraphs: vec![Paragraph::new(0, "Quarterly Review")],
                         }),
                     },
                     Block {
                         role: Role::Body,
                         content: BlockContent::Text(TextContent {
                             paragraphs: vec![
-                                Paragraph {
-                                    level: 0,
-                                    text: "revenue".into(),
-                                },
-                                Paragraph {
-                                    level: 1,
-                                    text: "up 12%".into(),
-                                },
+                                Paragraph::new(0, "revenue"),
+                                Paragraph::new(1, "up 12%"),
                             ],
                         }),
                     },
@@ -214,10 +245,7 @@ mod tests {
                     Block {
                         role: Role::SlideNumber,
                         content: BlockContent::Text(TextContent {
-                            paragraphs: vec![Paragraph {
-                                level: 0,
-                                text: "7".into(),
-                            }],
+                            paragraphs: vec![Paragraph::new(0, "7")],
                         }),
                     },
                 ],
@@ -245,6 +273,67 @@ mod tests {
     }
 
     #[test]
+    fn runs_export_as_markdown_emphasis() {
+        let deck = Deck {
+            slides: vec![Slide {
+                index: 0,
+                blocks: vec![Block {
+                    role: Role::Body,
+                    content: BlockContent::Text(TextContent {
+                        paragraphs: vec![Paragraph::from_runs(
+                            0,
+                            vec![
+                                Run {
+                                    text: "urgent".into(),
+                                    bold: Some(true),
+                                    ..Default::default()
+                                },
+                                Run::new(" and "),
+                                Run {
+                                    text: "noted".into(),
+                                    italic: Some(true),
+                                    ..Default::default()
+                                },
+                            ],
+                        )],
+                    }),
+                }],
+            }],
+        };
+        let md = to_markdown(&deck);
+        assert!(md.contains("- **urgent** and *noted*"), "{md}");
+    }
+
+    #[test]
+    fn links_wrap_the_innermost_text() {
+        let run = Run {
+            text: "report".into(),
+            bold: Some(true),
+            link: Some("https://example.com/r".into()),
+            ..Default::default()
+        };
+        let md = render_inline(&Paragraph::from_runs(0, vec![run]));
+        assert_eq!(md, "**[report](https://example.com/r)**");
+    }
+
+    #[test]
+    fn a_soft_break_inside_a_styled_paragraph_keeps_hanging_indent() {
+        let p = Paragraph::from_runs(
+            0,
+            vec![
+                Run {
+                    text: "head".into(),
+                    bold: Some(true),
+                    ..Default::default()
+                },
+                Run::new("tail\nsecond line"),
+            ],
+        );
+        let md = render_inline(&p);
+        assert_eq!(md, "**head**tail\nsecond line");
+    }
+
+    #[test]
     fn outline_lists_every_slide() {
         let deck = Deck {
             slides: vec![
@@ -253,10 +342,7 @@ mod tests {
                     blocks: vec![Block {
                         role: Role::Title,
                         content: BlockContent::Text(TextContent {
-                            paragraphs: vec![Paragraph {
-                                level: 0,
-                                text: "Intro".into(),
-                            }],
+                            paragraphs: vec![Paragraph::new(0, "Intro")],
                         }),
                     }],
                 },

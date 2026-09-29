@@ -2,8 +2,15 @@
 
 Slide *presentation* order is deliberately the reverse of filename order, so a
 reader that sorts `slideN.xml` instead of following `sldIdLst` gets it wrong.
+
+Everything here resolves: `tests/fixtures/validate_pptx.py` must accept the
+result, because a fixture that lies about how real packages hang together would
+teach the tests the wrong lesson.
 """
-import zipfile, sys
+import struct
+import sys
+import zipfile
+import zlib
 
 NS_P = 'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
 NS_A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
@@ -13,9 +20,11 @@ XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
 CONTENT_TYPES = XML + f'''<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
+<Default Extension="png" ContentType="image/png"/>
 <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
 <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
 <Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+<Override PartName="/ppt/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
 </Types>'''
 
 ROOT_RELS = XML + '''<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -100,6 +109,35 @@ SLIDE2 = XML + f'''<p:sld {NS_P} {NS_A} {NS_R}>{HEAD}
 </p:sp>
 </p:spTree></p:cSld></p:sld>'''
 
+# slide2 carries a chart frame and a picture, so it needs real relationships —
+# a package that names r:id without declaring it is one PowerPoint repairs.
+SLIDE2_RELS = XML + '''<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>
+</Relationships>'''
+
+CHART1 = XML + f'''<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" {NS_A}>
+<c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>growth</a:t></a:r></a:p></c:rich></c:tx></c:title>
+<c:plotArea><c:barChart><c:barDir val="col"/></c:barChart></c:plotArea>
+</c:chart></c:chartSpace>'''
+
+
+def png_1x1() -> bytes:
+    """A genuine 1x1 greyscale PNG, because a fake one is one failure away."""
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(b"\x00\x00"))
+        + chunk(b"IEND", b"")
+    )
+
+
 PARTS = [
     ("[Content_Types].xml", CONTENT_TYPES),
     ("_rels/.rels", ROOT_RELS),
@@ -107,10 +145,15 @@ PARTS = [
     ("ppt/_rels/presentation.xml.rels", PRES_RELS),
     ("ppt/slides/slide1.xml", SLIDE1),
     ("ppt/slides/slide2.xml", SLIDE2),
+    ("ppt/slides/_rels/slide2.xml.rels", SLIDE2_RELS),
+    ("ppt/charts/chart1.xml", CHART1),
 ]
 
 out = sys.argv[1] if len(sys.argv) > 1 else "sample.pptx"
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     for name, body in PARTS:
         z.writestr(name, body)
+    # Written as bytes rather than text: a PNG is not UTF-8 and must not be
+    # mangled on the way into the archive.
+    z.writestr("ppt/media/image1.png", png_1x1())
 print("wrote", out)

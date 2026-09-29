@@ -2,23 +2,35 @@
 //!
 //! Every conversion in deckr passes through one semantic representation, the
 //! [Deck IR](ir). Read a `.pptx` into it, emit Markdown (or JSON) out of it,
-//! and later rebuild a `.pptx` from it. Keeping the middle representation
-//! semantic rather than geometric is what makes round-tripping possible.
+//! and build a `.pptx` back from it. Keeping the middle representation
+//! semantic rather than geometric is what makes round-tripping possible — and
+//! what makes it possible to count what did not survive the trip.
 //!
 //! ```no_run
 //! use std::path::Path;
+//!
 //! let deck = deckr::read_pptx(Path::new("deck.pptx"))?;
 //! println!("{}", deckr::markdown::to_markdown(&deck));
+//!
+//! // The same IR goes back out. Nothing here says where anything sits: each
+//! // block carries a `Role` and binds to the matching master placeholder.
+//! let report = deckr::write_pptx_file(&deck, Path::new("rebuilt.pptx"))?;
+//! println!("wrote {} block(s), lost {}", report.blocks_written, report.skipped_count());
 //! # Ok::<(), deckr::Error>(())
 //! ```
 
+pub mod build;
 pub mod error;
 pub mod ir;
 pub mod markdown;
+pub mod md;
 pub mod ooxml;
+pub mod parts;
 
+pub use build::{BuildReport, write_pptx, write_pptx_file};
 pub use error::{Error, Result};
-pub use ir::{Block, BlockContent, Deck, Paragraph, Role, Slide, TextContent};
+pub use ir::{Block, BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};
+pub use md::parse_markdown;
 pub use ooxml::read_file;
 
 use std::path::Path;

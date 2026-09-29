@@ -25,12 +25,41 @@ jobs:
       # The fixture is generated rather than committed, so every platform
       # starts from a real .pptx built from the same source of truth.
       - name: Generate the test fixture
-        run: python tests/fixtures/make_sample_pptx.py tests/fixtures/sample.pptx
+        run: python3 tests/fixtures/make_sample_pptx.py tests/fixtures/sample.pptx
 
       - name: Build
         run: cargo build --all-targets
       - name: Test
         run: cargo test --all-targets
+
+      # The Rust tests only prove deckr agrees with itself. The validator is
+      # the part that enforces OPC the way PowerPoint reads it.
+      - name: Validate the fixture as an OPC package
+        run: python3 tests/fixtures/validate_pptx.py tests/fixtures/sample.pptx
+
+  package:
+    name: generated packages open
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate the test fixture
+        run: python3 tests/fixtures/make_sample_pptx.py tests/fixtures/sample.pptx
+
+      # Everything must survive pptx -> markdown -> pptx well enough that the
+      # result still opens. This is the claim the README makes, tested.
+      - name: Round-trip through Markdown
+        run: |
+          cargo run -- convert tests/fixtures/sample.pptx --to md --output target/deck.md
+          cargo run -- build target/deck.md --output target/rebuilt.pptx
+          cargo run -- check tests/fixtures/sample.pptx
+      - name: Round-trip through Deck IR JSON
+        run: |
+          cargo run -- convert tests/fixtures/sample.pptx --to json --output target/deck.json
+          cargo run -- build target/deck.json --output target/from-json.pptx
+      - name: Validate every generated package
+        run: python3 tests/fixtures/validate_pptx.py target/rebuilt.pptx target/from-json.pptx
 
   lint:
     name: fmt + clippy

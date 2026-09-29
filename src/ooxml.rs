@@ -21,7 +21,7 @@ use quick_xml::name::QName;
 use zip::ZipArchive;
 
 use crate::error::{Error, Result};
-use crate::ir::{Block, BlockContent, Deck, Paragraph, Role, Slide, TextContent};
+use crate::ir::{Block, BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};
 
 type Pkg = ZipArchive<File>;
 
@@ -81,6 +81,44 @@ fn ref_of(e: &BytesRef<'_>) -> String {
         _ => "",
     }
     .to_string()
+}
+
+/// `ppt/slides/slide2.xml` -> `ppt/slides/_rels/slide2.xml.rels`.
+fn rels_path_for(part: &str) -> String {
+    match part.rsplit_once('/') {
+        Some((dir, name)) => format!("{dir}/_rels/{name}.rels"),
+        None => format!("_rels/{part}.rels"),
+    }
+}
+
+/// DrawingML spells booleans several ways across revisions: `b="1"`,
+/// `b="on"`, `b="true"`. Anything else is not a value we understand, so we
+/// leave it as *inherit* rather than guessing.
+fn boolish(v: &str) -> Option<bool> {
+    match v.trim() {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// `<a:rPr strike="sngStrike">` rather than a boolean.
+fn strike(v: &str) -> Option<bool> {
+    match v.trim() {
+        "sngStrike" | "dblStrike" => Some(true),
+        "noStrike" | "none" => Some(false),
+        other => boolish(other),
+    }
+}
+
+/// `<a:rPr u="sng">` — any named underline style means underlined; only
+/// `"none"` means not.
+fn underline(v: &str) -> Option<bool> {
+    match v.trim() {
+        "" => None,
+        "none" => Some(false),
+        _ => Some(true),
+    }
 }
 
 fn attr(e: &BytesStart<'_>, key: &str) -> Option<String> {
@@ -155,7 +193,12 @@ pub fn read_file(path: &Path) -> Result<Deck> {
     let mut deck = Deck::default();
     for (index, part) in parts.iter().enumerate() {
         let xml = read_part(&mut pkg, part).ok_or_else(|| Error::MissingPart(part.clone()))?;
-        deck.slides.push(parse_slide(&xml, index, part)?);
+        // Hyperlinks are stored as relationship ids, so the slide's own rels
+        // part has to be available while its runs are being read.
+        let rels = read_part(&mut pkg, &rels_path_for(part))
+            .map(|x| parse_external_relationships(&x))
+            .unwrap_or_default();
+        deck.slides.push(parse_slide(&xml, index, part, &rels)?);
     }
     Ok(deck)
 }
@@ -237,6 +280,43 @@ fn parse_relationships(xml: &str) -> HashMap<String, String> {
     map
 }
 
+/// Only the relationships that point *outside* the package — hyperlink targets.
+///
+/// `TargetMode` defaults to `Internal`, where the target is another part name
+/// rather than a URL, so mixing the two would put part paths in links.
+fn parse_external_relationships(xml: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let mut id = None;
+                let mut target = None;
+                let mut external = false;
+                for a in e.attributes().flatten() {
+                    if let Some((k, v)) = attr_of(&a) {
+                        match k.as_str() {
+                            "Id" => id = Some(v),
+                            "Target" => target = Some(v),
+                            "TargetMode" => external = v.eq_ignore_ascii_case("external"),
+                            _ => {}
+                        }
+                    }
+                }
+                if external {
+                    if let (Some(i), Some(t)) = (id, target) {
+                        map.insert(i, t);
+                    }
+                }
+            }
+            Ok(_) => {}
+        }
+    }
+    map
+}
+
 /// Fallback when `presentation.xml` is unreadable: numeric filename order.
 fn scan_slide_parts(pkg: &mut Pkg) -> Vec<String> {
     let mut found: Vec<(u32, String)> = Vec::new();
@@ -274,7 +354,7 @@ enum ShapeKind {
 /// Using a builder rather than a tree keeps the parser single-pass and O(1) in
 /// memory per shape, which matters once you point it at a 400-slide deck.
 #[derive(Debug)]
-struct ShapeBuilder {
+struct ShapeBuilder<'a> {
     kind: ShapeKind,
     /// Role declared by `p:ph/@type`, if any.
     ph_role: Option<Role>,
@@ -291,6 +371,15 @@ struct ShapeBuilder {
     in_run: bool,
     paragraphs: Vec<Paragraph>,
 
+    /// The text run being assembled right now, if any.
+    pending: Option<Run>,
+    /// Runs accumulated for the paragraph currently open.
+    runs: Vec<Run>,
+    /// Inside `<a:rPr><a:solidFill>`, so `<a:srgbClr val="…"/>` is a colour.
+    in_solid_fill: bool,
+    /// Hyperlinks arrive as relationship ids; this resolves them to URLs.
+    rels: &'a HashMap<String, String>,
+
     table: bool,
     rows: Vec<Vec<String>>,
     row: Option<Vec<String>>,
@@ -300,8 +389,8 @@ struct ShapeBuilder {
     diagram: bool,
 }
 
-impl ShapeBuilder {
-    fn new(kind: ShapeKind) -> Self {
+impl<'a> ShapeBuilder<'a> {
+    fn new(kind: ShapeKind, rels: &'a HashMap<String, String>) -> Self {
         Self {
             kind,
             ph_role: None,
@@ -313,6 +402,10 @@ impl ShapeBuilder {
             buf: String::new(),
             in_run: false,
             paragraphs: Vec::new(),
+            pending: None,
+            runs: Vec::new(),
+            in_solid_fill: false,
+            rels,
             table: false,
             rows: Vec::new(),
             row: None,
@@ -355,14 +448,53 @@ impl ShapeBuilder {
                     self.level = lvl.trim().parse::<u8>().unwrap_or(0);
                 }
             }
-            "br" if self.txbody_depth > 0 => self.buf.push('\n'),
+            // `<a:r>` and `<a:fld>` both begin a text run; the difference is
+            // merely that a field's characters are generated rather than typed.
+            "r" | "fld" if self.txbody_depth > 0 => {
+                self.flush_run();
+                self.pending = Some(Run::default());
+            }
+            "rPr" => {
+                if let Some(r) = self.pending.as_mut() {
+                    for a in e.attributes().flatten() {
+                        let Some((k, v)) = attr_of(&a) else { continue };
+                        match k.as_str() {
+                            "b" => r.bold = boolish(&v),
+                            "i" => r.italic = boolish(&v),
+                            "u" => r.underline = underline(&v),
+                            "strike" => r.strike = strike(&v),
+                            // DrawingML measures in hundredths of a point.
+                            "sz" => r.size = v.trim().parse::<u32>().ok(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            // Colour is nested rather than an attribute: rPr -> solidFill ->
+            // srgbClr. Theme references (`schemeClr`) deliberately do not become
+            // colours — they are indirection, and resolving them is the job of
+            // whoever owns the theme.
+            "solidFill" => self.in_solid_fill = true,
+            "srgbClr" if self.in_solid_fill => {
+                if let (Some(r), Some(v)) = (self.pending.as_mut(), attr(e, "val")) {
+                    r.color = Some(v.to_uppercase());
+                }
+            }
+            "hlinkClick" => {
+                if let Some(r) = self.pending.as_mut() {
+                    if let Some(id) = attr(e, "id").or_else(|| attr(e, "Id")) {
+                        r.link = self.rels.get(&id).cloned();
+                    }
+                }
+            }
+            "br" if self.txbody_depth > 0 => self.push_text("\n"),
             // `a:t` is the only element whose character data is text.
             "t" => self.in_run = true,
             _ => {}
         }
     }
 
-    fn on_text(&mut self, text: &str) {
+    fn push_text(&mut self, text: &str) {
         // Whitespace between child elements is not content; only `<a:t>` is.
         if !self.in_run {
             return;
@@ -370,7 +502,25 @@ impl ShapeBuilder {
         if let Some(cell) = self.cell.as_mut() {
             cell.push_str(text);
         } else if self.para_open && self.txbody_depth > 0 {
-            self.buf.push_str(text);
+            match self.pending.as_mut() {
+                Some(r) => r.text.push_str(text),
+                None => self.buf.push_str(text),
+            }
+        }
+    }
+
+    fn on_text(&mut self, text: &str) {
+        self.push_text(text);
+    }
+
+    /// Hand the run being assembled to the paragraph now open.
+    fn flush_run(&mut self) {
+        if let Some(r) = self.pending.take() {
+            // A run that carries properties but no characters is invisible; it
+            // would otherwise show up as a spurious empty span on export.
+            if !r.text.is_empty() {
+                self.runs.push(r);
+            }
         }
     }
 
@@ -381,11 +531,29 @@ impl ShapeBuilder {
                     self.txbody_depth -= 1;
                 }
             }
+            "solidFill" | "rPr" => self.in_solid_fill = false,
+            "r" | "fld" => {
+                if self.txbody_depth > 0 {
+                    self.flush_run();
+                }
+            }
             "p" if self.para_open => {
-                let text = collapse_spaces(&self.buf).trim().to_string();
+                self.flush_run();
+                let mut runs = std::mem::take(&mut self.runs);
+                let text = if runs.is_empty() {
+                    collapse_spaces(&self.buf)
+                } else {
+                    // Collapse each run's own whitespace so element
+                    // indentation vanishes, then trim the assembly.
+                    for r in runs.iter_mut() {
+                        r.text = collapse_spaces(&r.text);
+                    }
+                    runs.iter().map(|r| r.text.as_str()).collect::<String>()
+                };
                 self.paragraphs.push(Paragraph {
                     level: self.level,
-                    text,
+                    text: text.trim().to_string(),
+                    runs,
                 });
                 self.para_open = false;
                 self.buf.clear();
@@ -441,6 +609,11 @@ impl ShapeBuilder {
 
 /// Runs of whitespace inside a line collapse to one space; newlines from
 /// `<a:br/>` are kept so a soft break survives the round trip.
+///
+/// Leading whitespace is deliberately preserved: a second run often opens with
+/// the space that separates it from the first (`"Hello "` + `" world"`), and
+/// collapsing that away silently glues words together. Callers trim the
+/// finished paragraph instead.
 fn collapse_spaces(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut pending_space = false;
@@ -452,7 +625,7 @@ fn collapse_spaces(s: &str) -> String {
             }
             c if c.is_whitespace() => pending_space = true,
             c => {
-                if pending_space && !out.is_empty() && !out.ends_with('\n') {
+                if pending_space && !out.ends_with('\n') {
                     out.push(' ');
                 }
                 pending_space = false;
@@ -464,7 +637,15 @@ fn collapse_spaces(s: &str) -> String {
 }
 
 /// Parse one `ppt/slides/slideN.xml` part into a [`Slide`].
-pub fn parse_slide(xml: &str, index: usize, part: &str) -> Result<Slide> {
+///
+/// `rels` maps relationship ids to external targets, which is how hyperlinks are
+/// stored; without it a link is only ever the opaque string `rId2`.
+pub fn parse_slide(
+    xml: &str,
+    index: usize,
+    part: &str,
+    rels: &HashMap<String, String>,
+) -> Result<Slide> {
     // Deliberately NOT trimming whitespace globally: quick-xml emits an entity
     // reference as its own event and trims the fragments either side of it, so
     // "Hello &amp; welcome" would otherwise come back as "Hellowelcome". We gate
@@ -476,7 +657,7 @@ pub fn parse_slide(xml: &str, index: usize, part: &str) -> Result<Slide> {
     // Nesting depth inside the shape we are currently collecting, so that a
     // nested group still terminates on the shape's own closing tag.
     let mut depth: usize = 0;
-    let mut shape: Option<ShapeBuilder> = None;
+    let mut shape: Option<ShapeBuilder<'_>> = None;
 
     loop {
         match reader.read_event() {
@@ -487,7 +668,7 @@ pub fn parse_slide(xml: &str, index: usize, part: &str) -> Result<Slide> {
                     depth += 1;
                     s.on_start(&local, &e);
                 } else if let Some(kind) = shape_kind(&local) {
-                    shape = Some(ShapeBuilder::new(kind));
+                    shape = Some(ShapeBuilder::new(kind, rels));
                     depth = 1;
                 }
             }
@@ -559,8 +740,12 @@ mod tests {
     );
 
     fn slide(body: &str) -> Slide {
+        slide_with_rels(body, &HashMap::new())
+    }
+
+    fn slide_with_rels(body: &str, rels: &HashMap<String, String>) -> Slide {
         let xml = format!("{NS}{body}</p:spTree></p:cSld></p:sld>");
-        parse_slide(&xml, 0, "ppt/slides/slide1.xml").expect("slide parses")
+        parse_slide(&xml, 0, "ppt/slides/slide1.xml", rels).expect("slide parses")
     }
 
     const TITLE: &str = r#"
@@ -657,7 +842,7 @@ mod tests {
             NS = NS,
             TITLE_INNER = "<p:nvSpPr><p:nvPr><p:ph type=\"title\"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:t>Nested</a:t></a:p></p:txBody>"
         );
-        let s = parse_slide(&grouped, 0, "ppt/slides/slide1.xml").unwrap();
+        let s = parse_slide(&grouped, 0, "ppt/slides/slide1.xml", &HashMap::new()).unwrap();
         assert_eq!(
             s.blocks.len(),
             1,
@@ -759,5 +944,68 @@ mod tests {
             }
         }
         assert_eq!(got, vec!["rId2".to_string(), "rId1".to_string()]);
+    }
+
+    const STYLED: &str = r#"
+        <p:sp>
+          <p:nvSpPr><p:cNvPr id="3" name="Content 2"/><p:nvPr><p:ph/></p:nvPr></p:nvSpPr>
+          <p:txBody>
+            <a:p>
+              <a:r><a:rPr lang="en-US" b="1" sz="2400" dirty="0"/><a:t>Bold headline</a:t></a:r>
+              <a:r><a:rPr lang="en-US" i="1" strike="sngStrike" dirty="0"/><a:t>quiet note</a:t></a:r>
+              <a:r>
+                <a:rPr lang="en-US" u="sng" dirty="0">
+                  <a:solidFill><a:srgbClr val="ff0000"/></a:solidFill>
+                  <a:hlinkClick r:id="rId2"/>
+                </a:rPr>
+                <a:t>read the report</a:t>
+              </a:r>
+            </a:p>
+          </p:txBody>
+        </p:sp>"#;
+
+    #[test]
+    fn run_formatting_survives_the_read() {
+        let rels = HashMap::from([("rId2".to_string(), "https://example.com/report".to_string())]);
+        let s = slide_with_rels(STYLED, &rels);
+        let text = s.blocks[0].as_text().expect("body holds text");
+        let runs = &text.paragraphs[0].runs;
+
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].text, "Bold headline");
+        assert_eq!(runs[0].bold, Some(true));
+        assert_eq!(runs[0].size, Some(2400));
+        // Absent is not "false" — it means inherit from the placeholder.
+        assert_eq!(runs[0].underline, None);
+
+        assert_eq!(runs[1].italic, Some(true));
+        assert_eq!(runs[1].strike, Some(true));
+
+        assert_eq!(runs[2].color.as_deref(), Some("FF0000"));
+        assert_eq!(runs[2].underline, Some(true));
+        assert_eq!(runs[2].link.as_deref(), Some("https://example.com/report"));
+
+        // The flat text fast path still sees the whole paragraph.
+        assert_eq!(
+            text.paragraphs[0].text,
+            "Bold headlinequiet noteread the report"
+        );
+        assert!(text.has_formatting());
+    }
+
+    #[test]
+    fn an_unresolvable_hyperlink_is_dropped_not_guessed() {
+        let s = slide(STYLED);
+        let runs = &s.blocks[0].as_text().unwrap().paragraphs[0].runs;
+        assert_eq!(runs[2].link, None, "no rels part means no URL");
+        assert_eq!(runs[2].text, "read the report");
+    }
+
+    #[test]
+    fn slide_rels_live_next_door() {
+        assert_eq!(
+            rels_path_for("ppt/slides/slide2.xml"),
+            "ppt/slides/_rels/slide2.xml.rels"
+        );
     }
 }
