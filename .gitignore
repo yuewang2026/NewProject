@@ -1,0 +1,10 @@
+/target
+
+# Generated fixture — rebuild it with tests/fixtures/make_sample_pptx.py
+/tests/fixtures/sample.pptx
+
+*.pdb
+*.swp
+.DS_Store
+.idea/
+.vscode/

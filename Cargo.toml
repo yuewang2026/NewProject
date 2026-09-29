@@ -1,0 +1,39 @@
+[package]
+name = "deckr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["yuewang2026"]
+description = "A bidirectional PowerPoint engine: read .pptx into a semantic Deck IR, emit Markdown or JSON, and build it back."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/yuewang2026/NewProject"
+homepage = "https://github.com/yuewang2026/NewProject"
+documentation = "https://docs.rs/deckr"
+keywords = ["pptx", "powerpoint", "ooxml", "presentation", "document"]
+categories = ["command-line-utilities", "parser-implementations", "text-processing"]
+
+[dependencies]
+# `default-features = false` drops clap's `color` support, which is what drags
+# anstream -> anstyle-wincon -> windows-sys into the graph on Windows.
+clap = { version = "4.6.7", default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+    "suggestions",
+] }
+quick-xml = "0.42.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+# Office packages use ZIP Deflate or Stored; we deliberately do not pull in
+# aes/bzip2/lzma/zstd support, which would drag ~25 transitive crates along.
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+# Keep the dependency graph honest and the test suite fast.
+
+[profile.release]
+lto = true
+strip = true

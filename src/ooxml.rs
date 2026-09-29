@@ -1,0 +1,763 @@
+//! Reading `.pptx` (OOXML / PresentationML) into [`Deck`].
+//!
+//! # Why read order matters
+//!
+//! A `.pptx` is a ZIP of XML parts. The naive approach — sort `ppt/slides/slideN.xml`
+//! by N — is wrong: after reordering slides in PowerPoint, `slide7.xml` can be the
+//! first slide shown. The authoritative order lives in `ppt/presentation.xml`
+//! (`<p:sldIdLst>`), whose `r:id`s resolve through `ppt/_rels/presentation.xml.rels`.
+//! We read that chain first and only fall back to filename scanning when the
+//! presentation part is missing or malformed.
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+
+use quick_xml::Reader as XmlReader;
+use quick_xml::events::attributes::Attribute;
+use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
+use quick_xml::name::QName;
+use zip::ZipArchive;
+
+use crate::error::{Error, Result};
+use crate::ir::{Block, BlockContent, Deck, Paragraph, Role, Slide, TextContent};
+
+type Pkg = ZipArchive<File>;
+
+const PRESENTATION: &str = "ppt/presentation.xml";
+const PRESENTATION_RELS: &str = "ppt/_rels/presentation.xml.rels";
+
+// ---------------------------------------------------------------------------
+// small helpers that insulate us from the XML crate's churn
+// ---------------------------------------------------------------------------
+
+/// Local name of a qualified name — `p:sp` -> `"sp"`.
+fn local_name(name: QName<'_>) -> String {
+    let full: &str = name.0;
+    match full.rsplit_once(':') {
+        Some((_, local)) => local.to_string(),
+        None => full.to_string(),
+    }
+}
+
+/// Resolve the five entities XML actually permits, `&amp;` last so we don't
+/// double-decode. quick-xml hands us the raw source text, so this is required.
+fn unescape(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#10;", "\n")
+        .replace("&#13;", "\r")
+        .replace("&amp;", "&")
+}
+
+fn text_of(e: &BytesText<'_>) -> String {
+    e.as_ref().to_string()
+}
+
+/// Resolve an XML entity reference (`&amp;`, `&#8212;`) to the character it
+/// stands for. The reader hands these to us as their own event rather than
+/// folding them into the surrounding text, so ignoring them silently loses
+/// every ampersand in a deck.
+fn ref_of(e: &BytesRef<'_>) -> String {
+    let name: &str = e.as_ref();
+    if e.is_char_ref() {
+        return match e.resolve_char_ref() {
+            Ok(Some(c)) => c.to_string(),
+            _ => String::new(),
+        };
+    }
+    match name {
+        "amp" => "&",
+        "lt" => "<",
+        "gt" => ">",
+        "quot" => "\"",
+        "apos" => "'",
+        _ => "",
+    }
+    .to_string()
+}
+
+fn attr(e: &BytesStart<'_>, key: &str) -> Option<String> {
+    for a in e.attributes().flatten() {
+        if local_name(a.key) == key {
+            return Some(unescape(&a.value));
+        }
+    }
+    None
+}
+
+fn attr_of(a: &Attribute<'_>) -> Option<(String, String)> {
+    Some((local_name(a.key), unescape(&a.value)))
+}
+
+/// `<p:sldId id="257" r:id="rId2"/>` carries two attributes called `id`: the
+/// unqualified one is the slide's own numeric id, and the namespaced one points
+/// at the relationship that resolves to the actual part. Taking the first match
+/// picks the wrong one on every real file, silently degrading us to filename
+/// order — which is exactly the order we set out not to trust.
+fn rel_id(e: &BytesStart<'_>) -> Option<String> {
+    let mut unqualified = None;
+    for a in e.attributes().flatten() {
+        if local_name(a.key) != "id" {
+            continue;
+        }
+        if a.key.0.contains(':') {
+            return Some(unescape(&a.value));
+        }
+        unqualified = Some(unescape(&a.value));
+    }
+    unqualified
+}
+
+/// Join a relationship target onto `base_dir` and normalise `.` / `..`.
+fn resolve_part(base_dir: &str, target: &str) -> String {
+    let raw = if target.starts_with('/') {
+        target.trim_start_matches('/').to_string()
+    } else {
+        format!("{base_dir}{target}")
+    };
+    let mut out: Vec<&str> = Vec::new();
+    for seg in raw.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            _ => out.push(seg),
+        }
+    }
+    out.join("/")
+}
+
+// ---------------------------------------------------------------------------
+// package traversal
+// ---------------------------------------------------------------------------
+
+/// Read a whole slide deck from a `.pptx` file.
+pub fn read_file(path: &Path) -> Result<Deck> {
+    let file = File::open(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut pkg = ZipArchive::new(file)?;
+
+    let parts = slide_part_order(&mut pkg)?;
+    if parts.is_empty() {
+        return Err(Error::MissingPart("ppt/slides/slide1.xml".to_string()));
+    }
+
+    let mut deck = Deck::default();
+    for (index, part) in parts.iter().enumerate() {
+        let xml = read_part(&mut pkg, part).ok_or_else(|| Error::MissingPart(part.clone()))?;
+        deck.slides.push(parse_slide(&xml, index, part)?);
+    }
+    Ok(deck)
+}
+
+fn read_part(pkg: &mut Pkg, name: &str) -> Option<String> {
+    let mut entry = pkg.by_name(name).ok()?;
+    let mut buf = String::new();
+    entry.read_to_string(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Slide parts in *presentation* order (not filename order).
+fn slide_part_order(pkg: &mut Pkg) -> Result<Vec<String>> {
+    let rels_xml = read_part(pkg, PRESENTATION_RELS).unwrap_or_default();
+    let rels = parse_relationships(&rels_xml);
+
+    let mut order: Vec<String> = Vec::new();
+    if let Some(pres_xml) = read_part(pkg, PRESENTATION) {
+        let mut reader = XmlReader::from_str(&pres_xml);
+        reader.config_mut().trim_text(true);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Eof) => break,
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                    if local_name(e.name()) == "sldId" {
+                        if let Some(id) = rel_id(&e) {
+                            if let Some(t) = rels.get(&id) {
+                                let part = resolve_part("ppt/", t);
+                                if !order.contains(&part) {
+                                    order.push(part);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(source) => {
+                    return Err(Error::Xml {
+                        part: PRESENTATION.to_string(),
+                        source,
+                    });
+                }
+            }
+        }
+    }
+
+    if order.is_empty() {
+        order = scan_slide_parts(pkg);
+    }
+    Ok(order)
+}
+
+fn parse_relationships(xml: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let mut id = None;
+                let mut target = None;
+                for a in e.attributes().flatten() {
+                    if let Some((k, v)) = attr_of(&a) {
+                        match k.as_str() {
+                            "Id" => id = Some(v),
+                            "Target" => target = Some(v),
+                            _ => {}
+                        }
+                    }
+                }
+                if let (Some(i), Some(t)) = (id, target) {
+                    map.insert(i, t);
+                }
+            }
+            Ok(_) => {}
+        }
+    }
+    map
+}
+
+/// Fallback when `presentation.xml` is unreadable: numeric filename order.
+fn scan_slide_parts(pkg: &mut Pkg) -> Vec<String> {
+    let mut found: Vec<(u32, String)> = Vec::new();
+    for name in pkg.file_names() {
+        if let Some(rest) = name.strip_prefix("ppt/slides/") {
+            if let Some(num) = rest
+                .strip_prefix("slide")
+                .and_then(|r| r.strip_suffix(".xml"))
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                found.push((num, name.to_string()));
+            }
+        }
+    }
+    found.sort_by_key(|(n, _)| *n);
+    found.into_iter().map(|(_, s)| s).collect()
+}
+
+// ---------------------------------------------------------------------------
+// slide parsing
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShapeKind {
+    /// `p:sp` — a text box (possibly a placeholder).
+    Shape,
+    /// `p:pic` — an embedded or linked picture.
+    Picture,
+    /// `p:graphicFrame` — a table, chart, diagram or OLE object.
+    GraphicFrame,
+}
+
+/// Accumulates everything we learn while streaming over one shape subtree.
+///
+/// Using a builder rather than a tree keeps the parser single-pass and O(1) in
+/// memory per shape, which matters once you point it at a 400-slide deck.
+#[derive(Debug)]
+struct ShapeBuilder {
+    kind: ShapeKind,
+    /// Role declared by `p:ph/@type`, if any.
+    ph_role: Option<Role>,
+    /// True once a `p:ph` element is seen — an untyped placeholder means `body`.
+    has_ph: bool,
+    alt: Option<String>,
+
+    txbody_depth: usize,
+    para_open: bool,
+    level: u8,
+    buf: String,
+    /// True while inside an `<a:t>` run. Everything else — indentation between
+    /// elements, `&nbsp;`-free whitespace — is layout noise we must not absorb.
+    in_run: bool,
+    paragraphs: Vec<Paragraph>,
+
+    table: bool,
+    rows: Vec<Vec<String>>,
+    row: Option<Vec<String>>,
+    cell: Option<String>,
+
+    chart: bool,
+    diagram: bool,
+}
+
+impl ShapeBuilder {
+    fn new(kind: ShapeKind) -> Self {
+        Self {
+            kind,
+            ph_role: None,
+            has_ph: false,
+            alt: None,
+            txbody_depth: 0,
+            para_open: false,
+            level: 0,
+            buf: String::new(),
+            in_run: false,
+            paragraphs: Vec::new(),
+            table: false,
+            rows: Vec::new(),
+            row: None,
+            cell: None,
+            chart: false,
+            diagram: false,
+        }
+    }
+
+    fn on_start(&mut self, local: &str, e: &BytesStart<'_>) {
+        match local {
+            "ph" => {
+                self.has_ph = true;
+                self.ph_role = attr(e, "type").and_then(|t| Role::from_ph_type(&t));
+            }
+            "cNvPr" => {
+                if self.alt.is_none() {
+                    self.alt = attr(e, "descr");
+                }
+            }
+            "graphicData" => {
+                if let Some(uri) = attr(e, "uri") {
+                    if uri.contains("drawingml/2006/diagram") {
+                        self.diagram = true;
+                    }
+                }
+            }
+            "chart" => self.chart = true,
+            "tbl" => self.table = true,
+            "tr" if self.table => self.row = Some(Vec::new()),
+            "tc" if self.table => self.cell = Some(String::new()),
+            "txBody" => self.txbody_depth += 1,
+            "p" if self.txbody_depth > 0 && !self.table => {
+                self.para_open = true;
+                self.level = 0;
+                self.buf.clear();
+            }
+            "pPr" => {
+                if let Some(lvl) = attr(e, "lvl") {
+                    self.level = lvl.trim().parse::<u8>().unwrap_or(0);
+                }
+            }
+            "br" if self.txbody_depth > 0 => self.buf.push('\n'),
+            // `a:t` is the only element whose character data is text.
+            "t" => self.in_run = true,
+            _ => {}
+        }
+    }
+
+    fn on_text(&mut self, text: &str) {
+        // Whitespace between child elements is not content; only `<a:t>` is.
+        if !self.in_run {
+            return;
+        }
+        if let Some(cell) = self.cell.as_mut() {
+            cell.push_str(text);
+        } else if self.para_open && self.txbody_depth > 0 {
+            self.buf.push_str(text);
+        }
+    }
+
+    fn on_end(&mut self, local: &str) {
+        match local {
+            "txBody" => {
+                if self.txbody_depth > 0 {
+                    self.txbody_depth -= 1;
+                }
+            }
+            "p" if self.para_open => {
+                let text = collapse_spaces(&self.buf).trim().to_string();
+                self.paragraphs.push(Paragraph {
+                    level: self.level,
+                    text,
+                });
+                self.para_open = false;
+                self.buf.clear();
+            }
+            "tc" => {
+                if let (Some(cell), Some(row)) = (self.cell.take(), self.row.as_mut()) {
+                    row.push(cell.trim().to_string());
+                }
+            }
+            "tr" => {
+                if let Some(row) = self.row.take() {
+                    self.rows.push(row);
+                }
+            }
+            "t" => self.in_run = false,
+            _ => {}
+        }
+    }
+
+    fn finish(self) -> Option<Block> {
+        let content = if self.table {
+            BlockContent::Table { rows: self.rows }
+        } else if self.chart {
+            BlockContent::Chart { caption: None }
+        } else if self.diagram {
+            BlockContent::Diagram { caption: None }
+        } else if self.kind == ShapeKind::Picture {
+            BlockContent::Picture { alt: self.alt }
+        } else if !self.paragraphs.is_empty() {
+            BlockContent::Text(TextContent {
+                paragraphs: self.paragraphs,
+            })
+        } else {
+            BlockContent::Empty
+        };
+
+        // A `<p:ph/>` with no `type` defaults to `body` per ECMA-376 §19.3.1.25.
+        let role = match self.ph_role {
+            Some(r) => r,
+            None if self.has_ph => Role::Body,
+            None => match &content {
+                BlockContent::Table { .. } => Role::Table,
+                BlockContent::Chart { .. } => Role::Chart,
+                BlockContent::Diagram { .. } => Role::Diagram,
+                BlockContent::Picture { .. } => Role::Picture,
+                _ => Role::Freeform,
+            },
+        };
+
+        Some(Block { role, content })
+    }
+}
+
+/// Runs of whitespace inside a line collapse to one space; newlines from
+/// `<a:br/>` are kept so a soft break survives the round trip.
+fn collapse_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.chars() {
+        match ch {
+            '\n' => {
+                out.push('\n');
+                pending_space = false;
+            }
+            c if c.is_whitespace() => pending_space = true,
+            c => {
+                if pending_space && !out.is_empty() && !out.ends_with('\n') {
+                    out.push(' ');
+                }
+                pending_space = false;
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// Parse one `ppt/slides/slideN.xml` part into a [`Slide`].
+pub fn parse_slide(xml: &str, index: usize, part: &str) -> Result<Slide> {
+    // Deliberately NOT trimming whitespace globally: quick-xml emits an entity
+    // reference as its own event and trims the fragments either side of it, so
+    // "Hello &amp; welcome" would otherwise come back as "Hellowelcome". We gate
+    // capture on `<a:t>` and collapse runs of whitespace ourselves.
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(false);
+
+    let mut blocks: Vec<Block> = Vec::new();
+    // Nesting depth inside the shape we are currently collecting, so that a
+    // nested group still terminates on the shape's own closing tag.
+    let mut depth: usize = 0;
+    let mut shape: Option<ShapeBuilder> = None;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                let local = local_name(e.name());
+                if let Some(s) = shape.as_mut() {
+                    depth += 1;
+                    s.on_start(&local, &e);
+                } else if let Some(kind) = shape_kind(&local) {
+                    shape = Some(ShapeBuilder::new(kind));
+                    depth = 1;
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if let Some(s) = shape.as_mut() {
+                    let local = local_name(e.name());
+                    // Self-closing elements can never contain text, so treating
+                    // them as "start" is enough (e.g. `<p:ph/>`, `<a:br/>`).
+                    s.on_start(&local, &e);
+                }
+            }
+            Ok(Event::End(e)) => {
+                if shape.is_some() {
+                    let local = local_name(e.name());
+                    if let Some(s) = shape.as_mut() {
+                        s.on_end(&local);
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(block) = shape.take().and_then(|s| s.finish()) {
+                            blocks.push(block);
+                        }
+                    }
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if let Some(s) = shape.as_mut() {
+                    s.on_text(&text_of(&e));
+                }
+            }
+            Ok(Event::GeneralRef(e)) => {
+                if let Some(s) = shape.as_mut() {
+                    s.on_text(&ref_of(&e));
+                }
+            }
+            Ok(_) => {}
+            Err(source) => {
+                return Err(Error::Xml {
+                    part: part.to_string(),
+                    source,
+                });
+            }
+        }
+    }
+
+    // Keep every block, including empty placeholders: knowing that slide 7 has
+    // an unused body placeholder is exactly the kind of thing a linter wants.
+    Ok(Slide { index, blocks })
+}
+
+fn shape_kind(local: &str) -> Option<ShapeKind> {
+    match local {
+        "sp" => Some(ShapeKind::Shape),
+        "pic" => Some(ShapeKind::Picture),
+        "graphicFrame" => Some(ShapeKind::GraphicFrame),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NS: &str = concat!(
+        r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#,
+        r#" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#,
+        r#" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">"#,
+        r#"<p:cSld><p:spTree>"#,
+    );
+
+    fn slide(body: &str) -> Slide {
+        let xml = format!("{NS}{body}</p:spTree></p:cSld></p:sld>");
+        parse_slide(&xml, 0, "ppt/slides/slide1.xml").expect("slide parses")
+    }
+
+    const TITLE: &str = r#"
+        <p:sp>
+          <p:nvSpPr>
+            <p:cNvPr id="2" name="Title 1"/>
+            <p:cNvSpPr txBox="1"/>
+            <p:nvPr><p:ph type="title"/></p:nvPr>
+          </p:nvSpPr>
+          <p:txBody>
+            <a:p>
+              <a:r><a:rPr lang="en-US"/><a:t>Hello &amp; welcome</a:t></a:r>
+              <a:r><a:t> to deckr</a:t></a:r>
+            </a:p>
+          </p:txBody>
+        </p:sp>"#;
+
+    /// `<p:ph/>` without `type` means `body` per ECMA-376, not `freeform`.
+    const UNTYPED_BODY: &str = r#"
+        <p:sp>
+          <p:nvSpPr><p:cNvPr id="3" name="Content 2"/><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+          <p:txBody>
+            <a:p><a:pPr lvl="0"/><a:r><a:t>alpha</a:t></a:r></a:p>
+            <a:p><a:pPr lvl="1"/><a:r><a:t>beta</a:t></a:r></a:p>
+            <a:p><a:pPr lvl="1"/><a:r><a:t>gamma<br/>delta</a:t></a:r></a:p>
+          </p:txBody>
+        </p:sp>"#;
+
+    const TABLE: &str = r#"
+        <p:graphicFrame>
+          <p:nvGraphicFramePr>
+            <p:cNvPr id="5" name="Table 4"/>
+            <p:nvPr/>
+          </p:nvGraphicFramePr>
+          <a:graphic>
+            <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+              <a:tbl>
+                <a:tr>
+                  <a:tc><a:txBody><a:p><a:t>Region</a:t></a:p></a:txBody></a:tc>
+                  <a:tc><a:txBody><a:p><a:t>Q3</a:t></a:p></a:txBody></a:tc>
+                </a:tr>
+                <a:tr>
+                  <a:tc><a:txBody><a:p><a:t>APAC</a:t></a:p></a:txBody></a:tc>
+                  <a:tc><a:txBody><a:p><a:t>1.2</a:t></a:p></a:txBody></a:tc>
+                </a:tr>
+              </a:tbl>
+            </a:graphicData>
+          </a:graphic>
+        </p:graphicFrame>"#;
+
+    const PICTURE: &str = r#"
+        <p:pic>
+          <p:nvPicPr>
+            <p:cNvPr id="4" name="Picture 3" descr="revenue trend"/>
+            <p:nvPr/>
+          </p:nvPicPr>
+          <p:blipFill><a:blip r:embed="rId2"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+        </p:pic>"#;
+
+    const CHART: &str = r#"
+        <p:graphicFrame>
+          <p:nvGraphicFramePr><p:cNvPr id="6" name="Chart 5"/><p:nvPr/></p:nvGraphicFramePr>
+          <a:graphic>
+            <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+              <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId4"/>
+            </a:graphicData>
+          </a:graphic>
+        </p:graphicFrame>"#;
+
+    #[test]
+    fn title_is_read_from_the_title_placeholder() {
+        let s = slide(TITLE);
+        assert_eq!(s.title().as_deref(), Some("Hello & welcome to deckr"));
+        assert!(s.blocks[0].as_text().is_some());
+        assert_eq!(s.blocks[0].role, Role::Title);
+    }
+
+    #[test]
+    fn untyped_placeholder_defaults_to_body() {
+        let s = slide(UNTYPED_BODY);
+        let text = s.blocks[0].as_text().expect("body text");
+        assert_eq!(s.blocks[0].role, Role::Body);
+        let levels: Vec<u8> = text.paragraphs.iter().map(|p| p.level).collect();
+        assert_eq!(levels, vec![0, 1, 1]);
+        assert_eq!(text.paragraphs[0].text, "alpha");
+        // A soft break stays a line feed rather than vanishing.
+        assert_eq!(text.paragraphs[2].text, "gamma\ndelta");
+    }
+
+    #[test]
+    fn untyped_ph_and_nested_groups_keep_their_own_shape() {
+        let grouped = format!(
+            "{NS}<p:grpSp><p:grpSpPr/><p:sp>{TITLE_INNER}</p:sp></p:grpSp></p:spTree></p:cSld></p:sld>",
+            NS = NS,
+            TITLE_INNER = "<p:nvSpPr><p:nvPr><p:ph type=\"title\"/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:t>Nested</a:t></a:p></p:txBody>"
+        );
+        let s = parse_slide(&grouped, 0, "ppt/slides/slide1.xml").unwrap();
+        assert_eq!(
+            s.blocks.len(),
+            1,
+            "the group itself must not become a block"
+        );
+        assert_eq!(s.title().as_deref(), Some("Nested"));
+    }
+
+    #[test]
+    fn tables_are_reconstructed_from_cells() {
+        let s = slide(TABLE);
+        match &s.blocks[0].content {
+            BlockContent::Table { rows } => assert_eq!(
+                rows,
+                &vec![
+                    vec!["Region".to_string(), "Q3".to_string()],
+                    vec!["APAC".to_string(), "1.2".to_string()],
+                ]
+            ),
+            other => panic!("expected a table, got {other:?}"),
+        }
+        assert_eq!(s.blocks[0].role, Role::Table);
+    }
+
+    #[test]
+    fn pictures_keep_alt_text() {
+        let s = slide(PICTURE);
+        assert_eq!(s.blocks[0].role, Role::Picture);
+        match &s.blocks[0].content {
+            BlockContent::Picture { alt } => assert_eq!(alt.as_deref(), Some("revenue trend")),
+            other => panic!("expected a picture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn charts_are_recorded_even_without_numbers() {
+        let s = slide(CHART);
+        assert!(matches!(s.blocks[0].content, BlockContent::Chart { .. }));
+        assert_eq!(s.blocks[0].role, Role::Chart);
+    }
+
+    #[test]
+    fn every_block_survives_one_slide() {
+        let body = format!("{TITLE}{UNTYPED_BODY}{TABLE}{PICTURE}{CHART}");
+        let s = slide(&body);
+        assert_eq!(s.blocks.len(), 5);
+        let roles: Vec<Role> = s.blocks.iter().map(|b| b.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                Role::Title,
+                Role::Body,
+                Role::Table,
+                Role::Picture,
+                Role::Chart
+            ]
+        );
+    }
+
+    #[test]
+    fn rels_targets_resolve_against_the_ppt_directory() {
+        assert_eq!(
+            resolve_part("ppt/", "slides/slide3.xml"),
+            "ppt/slides/slide3.xml"
+        );
+        assert_eq!(
+            resolve_part("ppt/", "slides/../slides/slide3.xml"),
+            "ppt/slides/slide3.xml"
+        );
+    }
+
+    #[test]
+    fn entities_are_decoded_once() {
+        assert_eq!(unescape("a &amp;amp; b"), "a &amp; b");
+        assert_eq!(unescape("&lt;p&gt;"), "<p>");
+        assert_eq!(unescape("plain"), "plain");
+    }
+
+    #[test]
+    fn relationship_id_wins_over_the_bare_slide_id() {
+        let xml = concat!(
+            r#"<p:sldIdLst xmlns:p="http://x" xmlns:r="http://y">"#,
+            r#"<p:sldId id="257" r:id="rId2"/>"#,
+            r#"<p:sldId r:id="rId1" id="256"/>"#,
+            r#"</p:sldIdLst>"#
+        );
+        let mut reader = XmlReader::from_str(xml);
+        reader.config_mut().trim_text(true);
+        let mut got = Vec::new();
+        loop {
+            match reader.read_event() {
+                Ok(Event::Eof) | Err(_) => break,
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                    if local_name(e.name()) == "sldId" {
+                        got.push(rel_id(&e).unwrap_or_default());
+                    }
+                }
+                Ok(_) => {}
+            }
+        }
+        assert_eq!(got, vec!["rId2".to_string(), "rId1".to_string()]);
+    }
+}
