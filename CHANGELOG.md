@@ -85,6 +85,19 @@ headings inside it mark the phases, not releases.
   into `Error`, which deliberately keeps the file path attached to its I/O
   errors. The snippet now uses `Box<dyn Error>` and is compiled by CI.
 
+### Added — SVG preview (0.3)
+
+- `deckr render` — turns each slide into a standalone, **dependency-free** SVG
+  preview: one `slide_N.svg` per slide plus a gallery `index.html`. Layout is by
+  `Role`, like PowerPoint's outline view, so it needs no `resvg` / `cosmic-text`
+  / `Typst` and builds anywhere deckr builds.
+- Title, body bullets (with level indentation), GitHub-flavoured tables and media
+  placeholder boxes (image / chart / diagram, with alt or caption text) all
+  render. Output is deterministic — no timestamps, no random ids — which keeps a
+  `diff` between two renders meaningful.
+- PNG/PDF rasterisation is deliberately a later step; the SVG is the vector
+  source of truth for now.
+
 ### Known limitations
 
 - Your own `.potx` template is not yet reusable; `parts.rs` ships one theme.
@@ -94,7 +107,8 @@ headings inside it mark the phases, not releases.
   a chart's data.
 - Diagrams (SmartArt) are detected and reported as skipped; they are not yet
   written back.
-- `render` (0.3) and `diff` (0.4) do not exist yet.
+- Rasterising the SVG preview to PNG/PDF (vs the vector preview shipped in 0.3)
+  and the semantic `diff` (0.4) are not done yet.
 - Notes, animations, speaker notes masters and media beyond pictures are ignored.
 
 [Unreleased]: https://github.com/yuewang2026/NewProject/compare/v0.1.0...HEAD

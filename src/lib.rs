@@ -26,12 +26,14 @@ pub mod markdown;
 pub mod md;
 pub mod ooxml;
 pub mod parts;
+pub mod render;
 
 pub use build::{write_pptx, write_pptx_file, BuildReport};
 pub use error::{Error, Result};
 pub use ir::{Block, BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};
 pub use md::parse_markdown;
 pub use ooxml::read_file;
+pub use render::{render_deck_svgs, render_slide};
 
 use std::path::Path;
 

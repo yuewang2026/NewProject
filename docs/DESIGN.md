@@ -162,7 +162,7 @@ the benefit is that the diff command has something to say.
 Neither PowerPoint nor LibreOffice appears in CI, so "it opens" must be proved
 structurally. Two layers, kept deliberately separate:
 
-- **Rust tests** prove deckr agrees with itself: 45 unit, 7 integration against the generated fixture (2 of them cover picture + chart survival), 1 doctest.
+- **Rust tests** prove deckr agrees with itself: 51 unit, 7 integration against the generated fixture (2 of them cover picture + chart survival), 1 doctest.
 - **`tests/fixtures/validate_pptx.py`** treats a generated package as an OPC package and asserts seven properties consumers actually depend on: every XML part parses, every declared part exists, every part is declared, every internal relationship resolves, every `r:id` referenced in XML is defined, the presentation's slide list resolves, and shape ids are unique within a slide.
 
 The second layer is Python and lives outside the Rust tests on purpose. When it
@@ -207,7 +207,8 @@ empty frame masquerading as a render.
 | Thing | Why not | When |
 |---|---|---|
 | Reuse your `.potx` template | `parts.rs` ships one theme; real picking/extraction needs a layout inventory | 0.3 |
-| Render to PDF/PNG | Borrowing Typst first; a native `cosmic-text + resvg` backend later | 0.3 |
+| Render to SVG (vector preview) | **Shipped in 0.3** — `deckr render` is pure-SVG, no native deps | 0.3 |
+| Rasterise to PNG/PDF | Needs `resvg`/`cosmic-text` or an external renderer; the SVG is the source of truth | later |
 | Read chart numbers | Capture ships in 0.2; decoding the `ChartBlob` into `ChartData` is a separate pass | 0.4 |
 | Semantic diff between decks | Needs both halves first; they now exist | 0.4 |
 | Notes, animations, audio/video | Real, but lower value per line of code now that picture + chart media round-trip | later |

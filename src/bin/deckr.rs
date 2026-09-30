@@ -71,6 +71,19 @@ enum Command {
         /// The .pptx to measure.
         file: PathBuf,
     },
+
+    /// Render a deck to per-slide SVG previews.
+    ///
+    /// Vector output (one `slide_N.svg` per slide plus a gallery `index.html`)
+    /// built with no external dependencies. Rasterising to PNG/PDF is a later
+    /// step.
+    Render {
+        /// The .pptx to read.
+        file: PathBuf,
+        /// Directory to write `slide_N.svg` and `index.html` into.
+        #[arg(short, long, default_value = "deckr_render")]
+        out: PathBuf,
+    },
 }
 
 fn main() {
@@ -221,8 +234,41 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
+
+        Command::Render { file, out } => {
+            let deck = deckr::read_pptx(&file)?;
+            std::fs::create_dir_all(&out)?;
+            let pages = deckr::render_deck_svgs(&deck);
+            for (n, svg) in &pages {
+                std::fs::write(out.join(format!("slide_{n}.svg")), svg)?;
+            }
+            std::fs::write(out.join("index.html"), gallery_html(&pages))?;
+            println!("rendered {} slide(s) to {}", pages.len(), out.display());
+            println!("  open {}/index.html to preview", out.display());
+        }
     }
     Ok(())
+}
+
+/// A minimal gallery page that embeds each slide SVG for quick eyeballing.
+fn gallery_html(pages: &[(usize, String)]) -> String {
+    let mut body = String::from(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+         <title>deckr render</title>\
+         <style>body{font-family:Segoe UI,Arial,sans-serif;background:#f4f4f4;\
+         margin:0;padding:24px}h1{font-weight:700;color:#1F3864}figure{background:#fff;\
+         margin:0 0 24px;padding:12px;border:1px solid #ddd;border-radius:6px}\
+         figcaption{color:#555;margin-top:8px}img{width:100%;height:auto;\
+         border:1px solid #eee}</style></head><body><h1>deckr render</h1>",
+    );
+    for (n, _) in pages {
+        body.push_str(&format!(
+            "<figure><img src=\"slide_{n}.svg\" alt=\"slide {n}\">\
+             <figcaption>Slide {n}</figcaption></figure>"
+        ));
+    }
+    body.push_str("</body></html>");
+    body
 }
 
 /// Every (level, text) pair in the deck that the writer is expected to place:
