@@ -102,17 +102,42 @@ headings inside it mark the phases, not releases.
 - New public API: `rasterise_svg`, `render_slide_png`, `render_deck_pngs` and the
   `RasterError` type, all in the `render` module.
 
+### Added — template reuse (0.3)
+
+- `deckr build --template corp.potx` — build the deck inside **your** PowerPoint
+  template. The `.potx`'s theme, slide master, slide layouts and their
+  relationship graphs (plus `presProps` / `viewProps` / `tableStyles` when the
+  template declares them) are copied verbatim into the output, and every
+  generated slide binds to the template's own layout placeholders. Corporate
+  colours, fonts and masters come for free; deckr's built-in theme is not
+  written at all.
+- A `Chrome` trait decouples the writer from the visual scaffolding:
+  `DefaultChrome` (deckr's built-in theme, the previous behaviour) and `Template`
+  (a loaded `.potx`) share one writer core, so template reuse touches no other
+  module. The package is read, never executed: sample slides, notes masters and
+  media in the template are deliberately left behind, so the output carries no
+  orphaned parts.
+- New public API: `Template::load`, `write_pptx_template` (any `Write + Seek`
+  sink) and `write_pptx_file_template`; the CLI's `build` command gained
+  `--template FILE`.
+- Layout choice and placeholder geometry come from the template's own layouts,
+  re-parsed at load time — an unbound block still lands loose and is reported
+  in `BuildReport.relocated`, exactly as with the default theme.
+- Template builds are deterministic (sorted part order, fixed ZIP timestamp) and
+  covered by four integration tests: theme inheritance (the fixture's accent1 is
+  a deliberate non-Office `C00000`), OPC validity of the merged package,
+  placeholder binding plus a read-back round trip, and byte-identical rebuilds.
+
 ### Known limitations
 
-- Your own `.potx` template is not yet reusable; `parts.rs` ships one theme.
 - Charts are preserved **verbatim**, not decoded — their numbers are not
   extracted into the IR (that is the later numeric-extraction phase). The chart
   is written back exactly as read, so nothing is lost, but deckr cannot yet edit
   a chart's data.
 - Diagrams (SmartArt) are detected and reported as skipped; they are not yet
   written back.
-- Rasterising the SVG preview to PNG/PDF (vs the vector preview shipped in 0.3)
-  and the semantic `diff` (0.4) are not done yet.
+- PDF rasterisation (PNG is shipped; PDF is not) and the semantic `diff` (0.4)
+  are not done yet.
 - Notes, animations, speaker notes masters and media beyond pictures are ignored.
 
 [Unreleased]: https://github.com/yuewang2026/deckr-pptx-oxide/compare/v0.1.0...HEAD

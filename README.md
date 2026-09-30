@@ -95,7 +95,7 @@ Three things fall out of having a real IR instead of string munging:
 |---|---|---|
 | `deckr inspect` | done | structure, per-slide titles, role histogram, JSON IR |
 | `deckr convert` | done | `.pptx` → Markdown or JSON |
-| `deckr build` | done | Markdown or IR → `.pptx`, bound to the master by role |
+| `deckr build` | done | Markdown or IR → `.pptx`, bound to the master by role — or to *your* template with `--template corp.potx` |
 | `deckr check` | done | round-trip a file and report exactly what did not survive |
 | `deckr render` | 0.3 | slide → SVG, or `--png` for real bitmaps (resvg, pure Rust) |
 | `deckr diff` | 0.4 | semantic diff between two decks |
@@ -107,9 +107,30 @@ furniture, per-run formatting (bold, italic, underline, strike, size, colour,
 hyperlinks), **and slide order as the author intended it** rather than as
 filenames sort it.
 
-Still missing, deliberately: decoding chart *numbers* into editable data,
-SmartArt (diagram) round-tripping, and reusing your own `.potx` instead of the
-built-in theme.
+Still missing, deliberately: decoding chart *numbers* into editable data, and
+SmartArt (diagram) round-tripping.
+
+### Templates: your theme, not ours
+
+`deckr build --template corp.potx` builds the deck inside *your* template. The
+`.potx`'s theme, slide master, slide layouts (and `presProps` / `viewProps` /
+`tableStyles`) are copied into the output, and every slide is bound to the
+template's own layout placeholders — so the generated deck carries your
+corporate colours, fonts and masters, not deckr's built-in ones. Only the
+chrome is inherited: the template's sample slides, notes masters and media are
+deliberately left behind, so no orphaned parts ride along.
+
+```console
+$ deckr build deck.md --template corp.potx -o deck.pptx
+wrote deck.pptx
+```
+
+As a library:
+
+```rust
+let tpl = deckr::Template::load(Path::new("corp.potx"))?;
+deckr::write_pptx_file_template(&deck, Path::new("deck.pptx"), &tpl)?;
+```
 
 ## The loss report
 
@@ -172,6 +193,9 @@ $ deckr convert deck.pptx --to json -o deck.json
 $ deckr build deck.md -o deck.pptx
 $ deckr build deck.json -o deck.pptx
 
+# Or put it back inside your corporate template.
+$ deckr build deck.md --template corp.potx -o deck.pptx
+
 # How much of the original survived?
 $ deckr check deck.pptx
 
@@ -225,7 +249,8 @@ would bake a duplicate into the file.
 No PowerPoint and no LibreOffice is involved anywhere in CI, so "it opens" has
 to be proved structurally. Two layers:
 
-- 59 tests — 51 unit, 7 integration against the generated fixture, 1 doctest.
+- 65 tests — 53 unit, 7 integration against the generated fixture, 4 covering
+  the `.potx` template-reuse feature, 1 doctest.
 - `tests/fixtures/validate_pptx.py`, a standard-library-only checker that treats every generated `.pptx` as an OPC package and asserts all seven properties a consumer actually relies on: every XML part parses, every declared part exists, every part is declared, every internal relationship resolves, every `r:id` referenced in XML is defined, the presentation's slide list resolves, and shape ids are unique within each slide.
 
 It lives outside the Rust tests on purpose. When it fails, the bug is in our
@@ -395,7 +420,7 @@ deckr 的立场相反：**不允许你指定几何位置，只允许你声明语
 |---|---|---|
 | `deckr inspect` | 已完成 | 结构、每页标题、角色分布、JSON IR |
 | `deckr convert` | 已完成 | `.pptx` → Markdown 或 JSON |
-| `deckr build` | 已完成 | Markdown 或 IR → `.pptx`，按角色绑回母版 |
+| `deckr build` | 已完成 | Markdown 或 IR → `.pptx`，按角色绑回母版 —— 也可用 `--template corp.potx` 绑到*你的*模板 |
 | `deckr check` | 已完成 | 往返一个文件，逐项报告哪些内容没能存活 |
 | `deckr render` | 0.3 | 页面 → SVG，或加 `--png` 出真实位图（resvg，纯 Rust） |
 | `deckr diff` | 0.4 | 两份 deck 的语义 diff |
@@ -405,8 +430,27 @@ deckr 的立场相反：**不允许你指定几何位置，只允许你声明语
 run 级排版（粗斜体、下划线、删除线、字号、颜色、超链接），**以及作者真正想要的
 页序**，而不是文件名排序的页序。
 
-有意暂缺：把图表*数字*解码成可编辑数据、SmartArt（图示）的往返、复用你自己的
-`.potx` 而非内置主题。
+有意暂缺：把图表*数字*解码成可编辑数据、SmartArt（图示）的往返。
+
+### 模板：用你的主题，不是我们的
+
+`deckr build --template corp.potx` 会把 deck 建在*你的*模板里。`.potx` 的主题、
+幻灯片母版、版式（以及 `presProps` / `viewProps` / `tableStyles`）被原样继承进
+输出，每一页都绑定到模板自己的版式占位符 —— 生成的是你的企业色、企业字体、
+企业母版，而不是 deckr 的内置样式。继承的只有这些「骨架」：模板里的示例页、
+备注母版和媒体被刻意留下，不会有没有着落的孤儿 part 被带进输出。
+
+```console
+$ deckr build deck.md --template corp.potx -o deck.pptx
+wrote deck.pptx
+```
+
+库用法：
+
+```rust
+let tpl = deckr::Template::load(Path::new("corp.potx"))?;
+deckr::write_pptx_file_template(&deck, Path::new("deck.pptx"), &tpl)?;
+```
 
 ## 损耗报告
 
@@ -466,6 +510,9 @@ $ deckr convert deck.pptx --to json -o deck.json
 $ deckr build deck.md -o deck.pptx
 $ deckr build deck.json -o deck.pptx
 
+# 或者装回你的企业模板里。
+$ deckr build deck.md --template corp.potx -o deck.pptx
+
 # 原稿有多少活着回来了？
 $ deckr check deck.pptx
 
@@ -518,7 +565,8 @@ Read it. Diff it. Build it back.
 CI 里全程没有 PowerPoint，也没有 LibreOffice，所以「打得开」只能靠结构证明。
 两层保障：
 
-- 59 个测试 —— 51 个单元测试、7 个针对生成 fixture 的集成测试、1 个文档测试。
+- 65 个测试 —— 53 个单元测试、7 个针对生成 fixture 的集成测试、4 个覆盖 `.potx`
+  模板复用功能的集成测试、1 个文档测试。
 - `tests/fixtures/validate_pptx.py`，一个只用标准库的校验器。它把每个生成的 `.pptx` 当作 OPC 包来查，断言七项真正会被消费方依赖的性质：每个 XML part 能解析、声明的 part 都存在、存在的 part 都被声明、每个内部关系都能落地、XML 里引用的每个 `r:id` 都有定义、presentation 的页序能解析、以及每页内 shape id 不重复。
 
 它刻意放在 Rust 测试之外。当它报错时，问题出在我们对 OPC 的理解上，而不是在我们

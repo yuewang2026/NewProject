@@ -27,15 +27,19 @@ pub mod md;
 pub mod ooxml;
 pub mod parts;
 pub mod render;
+pub mod template;
 
-pub use build::{write_pptx, write_pptx_file, BuildReport};
+pub use build::{
+    BuildReport, write_pptx, write_pptx_file, write_pptx_file_template, write_pptx_template,
+};
 pub use error::{Error, Result};
 pub use ir::{Block, BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};
 pub use md::parse_markdown;
 pub use ooxml::read_file;
 pub use render::{
-    rasterise_svg, render_deck_pngs, render_deck_svgs, render_slide, render_slide_png, RasterError,
+    RasterError, rasterise_svg, render_deck_pngs, render_deck_svgs, render_slide, render_slide_png,
 };
+pub use template::Template;
 
 use std::path::Path;
 

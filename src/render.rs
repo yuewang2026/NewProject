@@ -308,8 +308,8 @@ pub const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 mod tests {
     use super::*;
     use crate::ir::{Block, Slide, TextContent};
-    use quick_xml::events::Event;
     use quick_xml::Reader as XmlReader;
+    use quick_xml::events::Event;
 
     /// An SVG is only useful if it parses; assert well-formedness via the same
     /// reader the rest of deckr uses.

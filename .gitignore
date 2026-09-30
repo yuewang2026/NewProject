@@ -8,3 +8,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Generated fixture — rebuild it with tests/fixtures/make_sample_pptx.py --template
+/tests/fixtures/template.potx

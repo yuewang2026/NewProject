@@ -527,9 +527,11 @@ mod tests {
         let json = r#"{"index":0,"blocks":[{"role":"title","content":{"text":{"paragraphs":[{"level":0,"text":"Hello"}]}}}]}"#;
         let slide: Slide = serde_json::from_str(json).expect("deserialises");
         assert_eq!(slide.title().as_deref(), Some("Hello"));
-        assert!(slide.blocks[0].as_text().unwrap().paragraphs[0]
-            .runs
-            .is_empty());
+        assert!(
+            slide.blocks[0].as_text().unwrap().paragraphs[0]
+                .runs
+                .is_empty()
+        );
         assert_eq!(
             slide.blocks[0].as_text().unwrap().paragraphs[0].display_runs(),
             vec![Run::new("Hello")]

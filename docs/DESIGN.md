@@ -206,7 +206,7 @@ empty frame masquerading as a render.
 
 | Thing | Why not | When |
 |---|---|---|
-| Reuse your `.potx` template | `parts.rs` ships one theme; real picking/extraction needs a layout inventory | 0.3 |
+| Reuse your `.potx` template | **Shipped in 0.3** — a `Chrome` trait decouples the writer from the scaffolding; `Template` copies the template's theme/master/layouts verbatim and re-parses its placeholder geometry | 0.3 |
 | Render to SVG (vector preview) | **Shipped in 0.3** — `deckr render` is pure-SVG, no native deps | 0.3 |
 | Rasterise to PNG | **Shipped in 0.3** — `deckr render --png` uses `resvg` (pure Rust), no system libs | 0.3 |
 | Rasterise to PDF | Needs a PDF backend on top of the PNG; the SVG/PNG path already covers "actually look at it" | later |
@@ -224,7 +224,9 @@ deckr
 │   ├── md.rs        Markdown -> Deck IR
 │   ├── markdown.rs  Deck IR -> Markdown, outline, role histogram
 │   ├── parts.rs     OPC scaffolding: content types, rels, master, layouts, theme
-│   ├── build.rs     Deck IR -> .pptx, plus BuildReport
+│   ├── build.rs     Deck IR -> .pptx, plus BuildReport; the Chrome trait lives here
+│   ├── template.rs  .potx reuse: load a template's chrome, impl Chrome for it
+│   ├── render.rs    Deck IR -> SVG preview -> PNG (resvg)
 │   ├── error.rs     one error type for every stage
 │   └── bin/deckr.rs CLI
 ├── examples/roundtrip.rs   the README snippet, compiled so docs cannot rot

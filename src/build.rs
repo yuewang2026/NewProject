@@ -7,19 +7,23 @@
 //! the generated deck looks like it was made in PowerPoint — structurally, it
 //! was.
 //!
-//! The one thing this does *not* do yet is reuse an existing corporate template;
-//! `parts.rs` ships a small default theme. Swapping in a template is a change
-//! confined to that module.
+//! The writer is chrome-agnostic: a crate-internal `Chrome` trait supplies the
+//! visual scaffolding (theme, master, layouts). `DefaultChrome`, in this module,
+//! emits deckr's own minimal theme; [`crate::template::Template`] reuses a
+//! user's `.potx` instead. Both satisfy the trait, so a generated deck can
+//! inherit a corporate look without this module knowing anything template
+//! specific.
 
 use std::io::{Seek, Write};
 use std::path::Path;
 
-use zip::write::{SimpleFileOptions, ZipWriter};
 use zip::CompressionMethod;
+use zip::write::{SimpleFileOptions, ZipWriter};
 
 use crate::error::{Error, Result};
 use crate::ir::{BlockContent, ChartBlob, Deck, Paragraph, Role, Run, Slide, TextContent};
 use crate::parts::{self, Rel};
+use crate::template::Template;
 
 /// Height of one table row: 0.405in, Office's own default.
 const ROW_HEIGHT: i64 = 370_332;
@@ -78,18 +82,194 @@ impl BuildReport {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Chrome: the visual scaffolding a deck is written into.
+//
+// The default chrome is deckr's own minimal theme + three layouts. A user
+// template (`.potx`) is a second implementation that reuses the template's
+// theme, master and layouts instead — so a generated deck inherits corporate
+// colours and fonts. Both satisfy this trait; the writer is chrome-agnostic.
+// ---------------------------------------------------------------------------
+
+/// A placeholder on a layout, resolved to geometry so a generated slide can
+/// both bind to it (`<p:ph type=.. idx=../>`) and cite its box.
+pub(crate) struct Placed {
+    pub idx: u32,
+    pub x: i64,
+    pub y: i64,
+    pub cx: i64,
+    pub cy: i64,
+    pub anchor: String,
+}
+
+/// The visual scaffolding a deck is written into.
+pub(crate) trait Chrome {
+    /// How many slide layouts this chrome offers.
+    fn layout_count(&self) -> usize;
+    /// Pick the layout a slide should use, judged by what it contains.
+    fn choose_layout(&self, slide: &Slide) -> usize;
+    /// The placeholder of a given `ph` type on a layout, if the layout has one.
+    fn placeholder(&self, layout: usize, ph_type: &str) -> Option<Placed>;
+    /// Write the static scaffolding (theme, master, layouts, their rels) into
+    /// the package. `DefaultChrome` emits deckr's; `Template` copies the
+    /// template's.
+    fn write_chrome<W: Write + Seek>(
+        &self,
+        zip: &mut ZipWriter<W>,
+        opts: SimpleFileOptions,
+    ) -> Result<()>;
+    /// `[Content_Types].xml` for the whole package.
+    fn content_types(&self, slide_count: usize, extra: &[(String, String)]) -> String;
+    /// `ppt/_rels/presentation.xml.rels`.
+    fn presentation_rels(&self, slide_count: usize) -> String;
+    /// The `Target` a slide's rels uses to reach its layout.
+    fn slide_layout_target(&self, layout: usize) -> String;
+    /// `ppt/slides/_rels/slideN.xml.rels` for a slide on `layout`.
+    fn slide_rels(&self, layout: usize, rels: &[Rel]) -> String;
+}
+
+/// deckr's built-in chrome: one theme, one master, three layouts.
+pub(crate) struct DefaultChrome;
+
+impl Chrome for DefaultChrome {
+    fn layout_count(&self) -> usize {
+        parts::layouts().len()
+    }
+    fn choose_layout(&self, slide: &Slide) -> usize {
+        let needs_content_slot = slide
+            .blocks
+            .iter()
+            .filter(|b| !b.is_empty() && !b.role.is_chrome())
+            .any(|b| matches!(b.role, Role::Body | Role::Object | Role::Table));
+        if needs_content_slot { 1 } else { 0 }
+    }
+    fn placeholder(&self, layout: usize, ph_type: &str) -> Option<Placed> {
+        let layouts = parts::layouts();
+        let l = layouts.get(layout)?;
+        let ph = l.placeholder(ph_type)?;
+        Some(Placed {
+            idx: ph.idx,
+            x: ph.x,
+            y: ph.y,
+            cx: ph.cx,
+            cy: ph.cy,
+            anchor: ph.anchor.to_string(),
+        })
+    }
+    fn write_chrome<W: Write + Seek>(
+        &self,
+        zip: &mut ZipWriter<W>,
+        opts: SimpleFileOptions,
+    ) -> Result<()> {
+        let n = self.layout_count();
+        put(zip, opts, "ppt/theme/theme1.xml", parts::THEME_XML)?;
+        put(
+            zip,
+            opts,
+            "ppt/slideMasters/slideMaster1.xml",
+            &parts::slide_master_xml(n),
+        )?;
+        put(
+            zip,
+            opts,
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            &parts::master_rels_xml(n),
+        )?;
+        for layout in parts::layouts() {
+            put(
+                zip,
+                opts,
+                &format!("ppt/slideLayouts/{}", layout.file),
+                &parts::slide_layout_xml(&layout),
+            )?;
+            put(
+                zip,
+                opts,
+                &format!("ppt/slideLayouts/_rels/{}.rels", layout.file),
+                &parts::layout_rels_xml(),
+            )?;
+        }
+        Ok(())
+    }
+    fn content_types(&self, slide_count: usize, extra: &[(String, String)]) -> String {
+        parts::content_types_xml(slide_count, self.layout_count(), extra)
+    }
+    fn presentation_rels(&self, slide_count: usize) -> String {
+        parts::presentation_rels_xml(slide_count)
+    }
+    fn slide_layout_target(&self, layout: usize) -> String {
+        format!("../slideLayouts/slideLayout{}.xml", layout + 1)
+    }
+    fn slide_rels(&self, layout: usize, rels: &[Rel]) -> String {
+        parts::slide_rels_xml(layout, rels)
+    }
+}
+
+/// Which `ph` type(s) a role wants to bind to, in preference order.
+fn desired_ph_types(role: Role) -> &'static [&'static str] {
+    match role {
+        Role::Title | Role::CenteredTitle => &["ctrTitle", "title"],
+        Role::Subtitle => &["subTitle"],
+        Role::Body | Role::Object => &["body"],
+        _ => &[],
+    }
+}
+
+/// Resolve a role to a concrete placeholder on `layout`, or `None` if the
+/// layout offers nothing it can bind to (in which case the caller places the
+/// text loose and reports it).
+fn binding<C: Chrome>(chrome: &C, layout: usize, role: Role) -> Option<(String, Placed)> {
+    for want in desired_ph_types(role) {
+        if let Some(p) = chrome.placeholder(layout, want) {
+            return Some((want.to_string(), p));
+        }
+    }
+    None
+}
+
 /// Serialise `deck` into a `.pptx` at `path`.
 pub fn write_pptx_file(deck: &Deck, path: &Path) -> Result<BuildReport> {
     let file = std::fs::File::create(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    write_pptx(deck, file)
+    write_pptx_chrome(deck, file, &DefaultChrome)
 }
 
-/// Serialise `deck` into a `.pptx`.
+/// Serialise `deck` into a `.pptx` using the default theme and layouts.
 pub fn write_pptx<W: Write + Seek>(deck: &Deck, sink: W) -> Result<BuildReport> {
-    let layouts = parts::layouts();
+    write_pptx_chrome(deck, sink, &DefaultChrome)
+}
+
+/// Serialise `deck` into a `.pptx` at `path` using a user template's chrome.
+pub fn write_pptx_file_template(
+    deck: &Deck,
+    path: &Path,
+    template: &Template,
+) -> Result<BuildReport> {
+    let file = std::fs::File::create(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    write_pptx_chrome(deck, file, template)
+}
+
+/// Serialise `deck` into a `.pptx` using a user template's chrome.
+pub fn write_pptx_template<W: Write + Seek>(
+    deck: &Deck,
+    sink: W,
+    template: &Template,
+) -> Result<BuildReport> {
+    write_pptx_chrome(deck, sink, template)
+}
+
+/// The chrome-agnostic core: build every part of the package, asking `chrome`
+/// for the layout choice, placeholder geometry and the static scaffolding.
+pub(crate) fn write_pptx_chrome<W: Write + Seek, C: Chrome>(
+    deck: &Deck,
+    sink: W,
+    chrome: &C,
+) -> Result<BuildReport> {
     let slide_count = deck.len();
     if slide_count == 0 {
         return Err(Error::Other(
@@ -108,9 +288,16 @@ pub fn write_pptx<W: Write + Seek>(deck: &Deck, sink: W) -> Result<BuildReport> 
     let mut pending = Pending::default();
     let mut slides: Vec<(usize, String, LinkTable, Vec<Rel>)> = Vec::with_capacity(slide_count);
     for slide in &deck.slides {
-        let layout_index = layout_for(slide);
+        let layout_index = chrome.choose_layout(slide);
         let mut extra = Vec::new();
-        let (body, links) = slide_xml(slide, layout_index, &mut report, &mut extra, &mut pending);
+        let (body, links) = slide_xml::<C>(
+            slide,
+            layout_index,
+            &mut report,
+            &mut extra,
+            &mut pending,
+            chrome,
+        );
         slides.push((layout_index, body, links, extra));
     }
 
@@ -126,7 +313,7 @@ pub fn write_pptx<W: Write + Seek>(deck: &Deck, sink: W) -> Result<BuildReport> 
         &mut zip,
         stamped,
         "[Content_Types].xml",
-        &parts::content_types_xml(slide_count, layouts.len(), &pending.types),
+        &chrome.content_types(slide_count, &pending.types),
     )?;
     put(&mut zip, stamped, "_rels/.rels", &parts::root_rels_xml())?;
     put(
@@ -152,37 +339,12 @@ pub fn write_pptx<W: Write + Seek>(deck: &Deck, sink: W) -> Result<BuildReport> 
         &mut zip,
         stamped,
         "ppt/_rels/presentation.xml.rels",
-        &parts::presentation_rels_xml(slide_count),
-    )?;
-    put(&mut zip, stamped, "ppt/theme/theme1.xml", parts::THEME_XML)?;
-
-    put(
-        &mut zip,
-        stamped,
-        "ppt/slideMasters/slideMaster1.xml",
-        &parts::slide_master_xml(layouts.len()),
-    )?;
-    put(
-        &mut zip,
-        stamped,
-        "ppt/slideMasters/_rels/slideMaster1.xml.rels",
-        &parts::master_rels_xml(layouts.len()),
+        &chrome.presentation_rels(slide_count),
     )?;
 
-    for layout in &layouts {
-        put(
-            &mut zip,
-            stamped,
-            &format!("ppt/slideLayouts/{}", layout.file),
-            &parts::slide_layout_xml(layout),
-        )?;
-        put(
-            &mut zip,
-            stamped,
-            &format!("ppt/slideLayouts/_rels/{}.rels", layout.file),
-            &parts::layout_rels_xml(),
-        )?;
-    }
+    // Theme, master and layouts come from the chrome — deckr's own, or a copy
+    // of the user's template.
+    chrome.write_chrome(&mut zip, stamped)?;
 
     for (i, (layout_index, body, links, extra)) in slides.iter().enumerate() {
         put(
@@ -207,7 +369,7 @@ pub fn write_pptx<W: Write + Seek>(deck: &Deck, sink: W) -> Result<BuildReport> 
             &mut zip,
             stamped,
             &format!("ppt/slides/_rels/slide{}.xml.rels", i + 1),
-            &parts::slide_rels_xml(*layout_index, &rels),
+            &chrome.slide_rels(*layout_index, &rels),
         )?;
     }
 
@@ -245,53 +407,16 @@ fn put<W: Write + Seek>(
     })
 }
 
-/// Which layout a slide deserves, judged only by what it contains.
-///
-/// A slide that is nothing but a title (and maybe a subtitle) wants the title
-/// layout; anything with content wants "Title and Content". This is what a human
-/// chooses in PowerPoint's layout gallery, derived rather than configured.
-fn layout_for(slide: &Slide) -> usize {
-    const TITLE_SLIDE: usize = 0;
-    const TITLE_AND_CONTENT: usize = 1;
-
-    // Judge by the roles that actually need a slot. A slide carrying nothing but
-    // a title and subtitle is a section divider even if a chart rides along —
-    // charts and pictures do not occupy the content placeholder.
-    let needs_content_slot = slide
-        .blocks
-        .iter()
-        .filter(|b| !b.is_empty() && !b.role.is_chrome())
-        .any(|b| matches!(b.role, Role::Body | Role::Object | Role::Table));
-    if needs_content_slot {
-        TITLE_AND_CONTENT
-    } else {
-        TITLE_SLIDE
-    }
-}
-
-/// The placeholder type a role binds to on a given layout, if any.
-fn placeholder_for(layout_index: usize, role: Role) -> Option<&'static str> {
-    // Index 0 is "Title Slide": ctrTitle + subTitle.
-    // Index 1 is "Title and Content": title + body.
-    match (layout_index, role) {
-        (0, Role::Title | Role::CenteredTitle) => Some("ctrTitle"),
-        (0, Role::Subtitle) => Some("subTitle"),
-        (1, Role::Title | Role::CenteredTitle) => Some("title"),
-        (1, Role::Body | Role::Object) => Some("body"),
-        _ => None,
-    }
-}
-
-fn slide_xml(
+/// The placeholder type a role binds to on a given layout is now resolved by
+/// [`binding`], which consults the active [`Chrome`]'s placeholders directly.
+fn slide_xml<C: Chrome>(
     slide: &Slide,
     layout_index: usize,
     report: &mut BuildReport,
     extra: &mut Vec<Rel>,
     pending: &mut Pending,
+    chrome: &C,
 ) -> (String, LinkTable) {
-    let layouts = parts::layouts();
-    let layout = &layouts[layout_index];
-
     let mut shapes = String::new();
     // Shape id 1 belongs to the shape tree itself.
     let mut next_id = 2u32;
@@ -304,11 +429,13 @@ fn slide_xml(
         .blocks
         .iter()
         .filter(|b| !b.is_empty() && !b.role.is_chrome())
-        .any(|b| placeholder_for(layout_index, b.role) == Some("body"));
-    let mut free_top = layout
-        .placeholder("body")
-        .filter(|_| claims_content_slot)
-        .map_or(CONTENT_TOP, |ph| ph.y + CONTENT_SLOT_HALF);
+        .any(|b| binding(chrome, layout_index, b.role).is_some_and(|(ph, _)| ph == "body"));
+    let body_placed = chrome.placeholder(layout_index, "body");
+    let mut free_top = if claims_content_slot {
+        body_placed.map_or(CONTENT_TOP, |p| p.y + CONTENT_SLOT_HALF)
+    } else {
+        CONTENT_TOP
+    };
 
     // Pictures and charts need their own relationship ids, assigned only after
     // every hyperlink has claimed its rId — so they are buffered here and
@@ -322,21 +449,13 @@ fn slide_xml(
         }
         match &block.content {
             BlockContent::Text(t) => {
-                match placeholder_for(layout_index, block.role) {
-                    Some(ph_type) => {
-                        let Some(ph) = layout.placeholder(ph_type) else {
-                            report.skipped.push(format!(
-                                "slide {}: layout is missing its {} placeholder",
-                                slide.index + 1,
-                                ph_type
-                            ));
-                            continue;
-                        };
+                match binding(chrome, layout_index, block.role) {
+                    Some((ph_type, placed)) => {
                         shapes.push_str(&text_shape(
                             next_id,
                             &format!("{} Placeholder", block.role.as_str()),
-                            ph_type,
-                            ph,
+                            &ph_type,
+                            &placed,
                             t,
                             &mut links,
                         ));
@@ -366,11 +485,11 @@ fn slide_xml(
                         next_id += 1;
                         report.blocks_written += 1;
                         report.relocated.push(format!(
-                            "slide {}: '{}' has no placeholder on layout '{}' — \
+                            "slide {}: '{}' has no placeholder on layout {} — \
                              placed loose, so it no longer follows the template",
                             slide.index + 1,
                             block.role,
-                            layout.name
+                            layout_index
                         ));
                     }
                 }
@@ -595,7 +714,7 @@ fn text_shape(
     id: u32,
     name: &str,
     ph_type: &str,
-    ph: &parts::Placeholder,
+    placed: &Placed,
     text: &TextContent,
     links: &mut LinkTable,
 ) -> String {
@@ -617,14 +736,32 @@ fn text_shape(
         id = id,
         name = parts::esc_attr(name),
         ph_type = ph_type,
-        idx = ph.idx,
-        x = ph.x,
-        y = ph.y,
-        cx = ph.cx,
-        cy = ph.cy,
-        anchor = ph.anchor,
+        idx = placed.idx,
+        x = placed.x,
+        y = placed.y,
+        cx = placed.cx,
+        cy = placed.cy,
+        anchor = parts::esc_attr(&placed.anchor),
         body = body,
     )
+}
+
+/// Write raw bytes into the package — used to copy a template's chrome parts
+/// (theme, master, layouts, …) verbatim.
+pub(crate) fn put_bytes<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    opts: SimpleFileOptions,
+    name: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    zip.start_file(name, opts).map_err(|e| Error::Io {
+        path: name.into(),
+        source: std::io::Error::other(e),
+    })?;
+    zip.write_all(bytes).map_err(|e| Error::Io {
+        path: name.into(),
+        source: e,
+    })
 }
 
 /// Height for text that has no layout placeholder to inherit a box from: one
@@ -960,8 +1097,8 @@ mod tests {
     #[test]
     fn a_title_only_slide_picks_the_title_layout() {
         let deck = two_slide_deck();
-        assert_eq!(layout_for(&deck.slides[0]), 0);
-        assert_eq!(layout_for(&deck.slides[1]), 1);
+        assert_eq!(DefaultChrome.choose_layout(&deck.slides[0]), 0);
+        assert_eq!(DefaultChrome.choose_layout(&deck.slides[1]), 1);
     }
 
     #[test]

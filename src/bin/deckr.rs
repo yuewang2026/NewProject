@@ -61,6 +61,10 @@ enum Command {
         /// Write the .pptx here. Defaults to the input stem.
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
+        /// Reuse a `.potx` template's theme, master and slide layouts so the
+        /// output inherits its corporate look.
+        #[arg(short, long, value_name = "FILE")]
+        template: Option<PathBuf>,
     },
 
     /// Round-trip a deck through the writer and report what came back.
@@ -141,7 +145,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 None => print!("{rendered}"),
             }
         }
-        Command::Build { file, output } => {
+        Command::Build {
+            file,
+            output,
+            template,
+        } => {
             let source = std::fs::read_to_string(&file)
                 .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
             let deck = match extension_of(&file).as_str() {
@@ -159,7 +167,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let out = output.unwrap_or_else(|| file.with_extension("pptx"));
-            let report = deckr::write_pptx_file(&deck, &out)?;
+            let report = match &template {
+                Some(t) => {
+                    let tpl = deckr::Template::load(t)?;
+                    deckr::write_pptx_file_template(&deck, &out, &tpl)?
+                }
+                None => deckr::write_pptx_file(&deck, &out)?,
+            };
             println!("wrote {}", out.display());
             println!("  slides: {}", report.slides);
             println!("  blocks written: {}", report.blocks_written);

@@ -14,10 +14,10 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+use quick_xml::Reader as XmlReader;
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use quick_xml::name::QName;
-use quick_xml::Reader as XmlReader;
 use zip::ZipArchive;
 
 use crate::error::{Error, Result};

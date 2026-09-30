@@ -86,11 +86,7 @@ fn render_text(out: &mut String, role: Role, text: &TextContent) {
         for (i, line) in body.lines().enumerate() {
             let marker = if bulleted {
                 // Continuation lines of a soft-broken bullet hang in.
-                if i == 0 {
-                    "- "
-                } else {
-                    "  "
-                }
+                if i == 0 { "- " } else { "  " }
             } else {
                 ""
             };
