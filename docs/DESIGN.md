@@ -208,7 +208,8 @@ empty frame masquerading as a render.
 |---|---|---|
 | Reuse your `.potx` template | `parts.rs` ships one theme; real picking/extraction needs a layout inventory | 0.3 |
 | Render to SVG (vector preview) | **Shipped in 0.3** — `deckr render` is pure-SVG, no native deps | 0.3 |
-| Rasterise to PNG/PDF | Needs `resvg`/`cosmic-text` or an external renderer; the SVG is the source of truth | later |
+| Rasterise to PNG | **Shipped in 0.3** — `deckr render --png` uses `resvg` (pure Rust), no system libs | 0.3 |
+| Rasterise to PDF | Needs a PDF backend on top of the PNG; the SVG/PNG path already covers "actually look at it" | later |
 | Read chart numbers | Capture ships in 0.2; decoding the `ChartBlob` into `ChartData` is a separate pass | 0.4 |
 | Semantic diff between decks | Needs both halves first; they now exist | 0.4 |
 | Notes, animations, audio/video | Real, but lower value per line of code now that picture + chart media round-trip | later |

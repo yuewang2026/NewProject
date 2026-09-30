@@ -33,7 +33,9 @@ pub use error::{Error, Result};
 pub use ir::{Block, BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};
 pub use md::parse_markdown;
 pub use ooxml::read_file;
-pub use render::{render_deck_svgs, render_slide};
+pub use render::{
+    rasterise_svg, render_deck_pngs, render_deck_svgs, render_slide, render_slide_png, RasterError,
+};
 
 use std::path::Path;
 

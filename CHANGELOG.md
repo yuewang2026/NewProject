@@ -95,8 +95,12 @@ headings inside it mark the phases, not releases.
   placeholder boxes (image / chart / diagram, with alt or caption text) all
   render. Output is deterministic — no timestamps, no random ids — which keeps a
   `diff` between two renders meaningful.
-- PNG/PDF rasterisation is deliberately a later step; the SVG is the vector
-  source of truth for now.
+- `deckr render --png` — rasterises each slide to a real `slide_N.png` bitmap with
+  `resvg` (pure Rust, no Cairo/HarfBuzz/fontconfig), so you get images you can
+  drop straight into a document or email. `resvg` is the only renderer dependency
+  and the SVG stays the vector source of truth.
+- New public API: `rasterise_svg`, `render_slide_png`, `render_deck_pngs` and the
+  `RasterError` type, all in the `render` module.
 
 ### Known limitations
 

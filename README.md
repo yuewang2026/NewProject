@@ -97,7 +97,7 @@ Three things fall out of having a real IR instead of string munging:
 | `deckr convert` | done | `.pptx` → Markdown or JSON |
 | `deckr build` | done | Markdown or IR → `.pptx`, bound to the master by role |
 | `deckr check` | done | round-trip a file and report exactly what did not survive |
-| `deckr render` | 0.3 | slide → SVG so you can actually look at it (no native deps) |
+| `deckr render` | 0.3 | slide → SVG, or `--png` for real bitmaps (resvg, pure Rust) |
 | `deckr diff` | 0.4 | semantic diff between two decks |
 
 Already handled: titles and free-form text boxes, nested bullet levels, soft
@@ -178,6 +178,12 @@ $ deckr check deck.pptx
 # Actually look at it — one SVG per slide plus a gallery page.
 $ deckr render deck.pptx
 rendered 23 slide(s) to deckr_render
+  open deckr_render/index.html to preview
+
+# ...or get real PNG bitmaps (one resvg raster per slide) for docs/email.
+$ deckr render deck.pptx --png
+rendered 23 slide(s) to deckr_render
+  rasterised 23 slide(s) to PNG
   open deckr_render/index.html to preview
 ```
 
@@ -391,7 +397,7 @@ deckr 的立场相反：**不允许你指定几何位置，只允许你声明语
 | `deckr convert` | 已完成 | `.pptx` → Markdown 或 JSON |
 | `deckr build` | 已完成 | Markdown 或 IR → `.pptx`，按角色绑回母版 |
 | `deckr check` | 已完成 | 往返一个文件，逐项报告哪些内容没能存活 |
-| `deckr render` | 0.3 | 页面 → SVG，好让你真的看一眼（无需原生依赖） |
+| `deckr render` | 0.3 | 页面 → SVG，或加 `--png` 出真实位图（resvg，纯 Rust） |
 | `deckr diff` | 0.4 | 两份 deck 的语义 diff |
 
 已支持：标题与自由文本框、多层缩进的项目符号、软换行、表格、图片（含 alt
@@ -466,6 +472,12 @@ $ deckr check deck.pptx
 # 真的看一眼 —— 每页一个 SVG，外加一个画廊页。
 $ deckr render deck.pptx
 rendered 23 slide(s) to deckr_render
+  open deckr_render/index.html to preview
+
+# ……或加 --png 拿到真实 PNG 位图（每页一张 resvg 栅格），方便塞进文档/邮件。
+$ deckr render deck.pptx --png
+rendered 23 slide(s) to deckr_render
+  rasterised 23 slide(s) to PNG
   open deckr_render/index.html to preview
 ```
 

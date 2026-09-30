@@ -1,10 +1,12 @@
-//! Render the Deck IR to SVG — a deterministic, dependency-free vector preview.
+//! Render the Deck IR to SVG — a deterministic vector preview — and, with
+//! `resvg`, to PNG bitmaps.
 //!
 //! deckr does not own pixel-accurate layout: the master owns geometry on the
 //! write side, so the renderer is a *preview* that places each block by role the
-//! way PowerPoint's outline view does. It needs no external crate (no resvg, no
-//! cosmic-text, no Typst), so it builds wherever deckr builds and stays cheap to
-//! test. Output is pure SVG; rasterising to PNG/PDF is a separate, later step.
+//! way PowerPoint's outline view does. The SVG path needs no external crate, so
+//! it builds wherever deckr builds and stays cheap to test. The PNG path uses
+//! `resvg` (pure Rust, no Cairo/HarfBuzz/fontconfig), the only renderer
+//! dependency, and is what `deckr render --png` calls.
 //!
 //! Rendering is fully deterministic — no timestamps, no random ids — which is
 //! what keeps a `diff` between two renders meaningful.
@@ -240,6 +242,68 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{taken}…")
 }
 
+// --- PNG rasterisation ---------------------------------------------------
+//
+// The SVG above is the vector source of truth. `deckr render --png` rasterises
+// it with `resvg` (pure Rust) so you get a real bitmap you can drop into a
+// document, email or slide. Rasterising is deterministic given the same fonts,
+// and resvg is the only renderer dependency.
+
+use resvg::usvg;
+
+/// Something went wrong turning an SVG string into a PNG buffer.
+#[derive(Debug, thiserror::Error)]
+pub enum RasterError {
+    /// The SVG could not be parsed into a render tree.
+    #[error("SVG parse failed: {0}")]
+    Parse(String),
+    /// `resvg` refused to rasterise the tree (e.g. zero-sized surface).
+    #[error("rasterisation failed: {0}")]
+    Render(String),
+    /// The output pixmap could not be allocated.
+    #[error("could not allocate an output pixmap")]
+    Alloc,
+}
+
+/// Render one slide straight to PNG bytes (encoded, not written).
+pub fn render_slide_png(slide: &Slide) -> Result<Vec<u8>, RasterError> {
+    rasterise_svg(&render_slide(slide))
+}
+
+/// Render every slide to PNG bytes, returning only the slides that rasterised
+/// successfully as `(1-based slide number, png bytes)`.
+pub fn render_deck_pngs(deck: &Deck) -> Vec<(usize, Vec<u8>)> {
+    deck.slides
+        .iter()
+        .map(|slide| (slide.index + 1, render_slide_png(slide)))
+        .filter_map(|(n, r)| r.ok().map(|bytes| (n, bytes)))
+        .collect()
+}
+
+/// Rasterise a standalone SVG string into PNG bytes via `resvg`.
+pub fn rasterise_svg(svg: &str) -> Result<Vec<u8>, RasterError> {
+    let opts = usvg::Options::default();
+    let tree = usvg::Tree::from_str(svg, &opts).map_err(|e| RasterError::Parse(e.to_string()))?;
+    let size = tree.size();
+    let (w, h) = (size.width().ceil() as u32, size.height().ceil() as u32);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).ok_or(RasterError::Alloc)?;
+    let mut pixmap_mut = pixmap.as_mut();
+    // resvg 0.44 takes a root transform instead of an auto-fit; the pixmap is
+    // sized to the SVG's own dimensions, so the identity transform is exact.
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap_mut,
+    );
+    pixmap
+        .encode_png()
+        .map_err(|e| RasterError::Render(e.to_string()))
+}
+
+/// The PNG magic number — used by tests and any caller that wants to sanity
+/// check the rasteriser output before writing it to disk.
+pub const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +434,30 @@ mod tests {
         assert_eq!(pages[0].0, 1);
         assert_eq!(pages[1].0, 2);
         assert!(pages.iter().all(|(_, s)| is_well_formed(s)));
+    }
+
+    #[test]
+    fn slide_rasterises_to_a_valid_png() {
+        let png = render_slide_png(&chart_slide()).expect("rasterisation should succeed");
+        assert!(png.len() > 8, "png buffer was empty");
+        assert_eq!(&png[..8], PNG_MAGIC, "output was not a PNG");
+        // A real raster has substantial payload beyond the 8-byte header.
+        assert!(
+            png.len() > 1024,
+            "png suspiciously small: {} bytes",
+            png.len()
+        );
+    }
+
+    #[test]
+    fn deck_rasterises_one_png_per_slide() {
+        let mut a = chart_slide();
+        a.index = 0;
+        let mut b = chart_slide();
+        b.index = 1;
+        let deck = Deck { slides: vec![a, b] };
+        let pngs = render_deck_pngs(&deck);
+        assert_eq!(pngs.len(), 2);
+        assert!(pngs.iter().all(|(_, b)| &b[..8] == PNG_MAGIC));
     }
 }

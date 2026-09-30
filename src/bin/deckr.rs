@@ -72,17 +72,20 @@ enum Command {
         file: PathBuf,
     },
 
-    /// Render a deck to per-slide SVG previews.
+    /// Render a deck to per-slide SVG (and optionally PNG) previews.
     ///
     /// Vector output (one `slide_N.svg` per slide plus a gallery `index.html`)
-    /// built with no external dependencies. Rasterising to PNG/PDF is a later
-    /// step.
+    /// is built with no external dependencies; pass `--png` to additionally
+    /// rasterise each slide to `slide_N.png` using `resvg` (pure Rust).
     Render {
         /// The .pptx to read.
         file: PathBuf,
         /// Directory to write `slide_N.svg` and `index.html` into.
         #[arg(short, long, default_value = "deckr_render")]
         out: PathBuf,
+        /// Also rasterise each slide to `slide_N.png` with resvg.
+        #[arg(long)]
+        png: bool,
     },
 }
 
@@ -235,14 +238,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Render { file, out } => {
+        Command::Render { file, out, png } => {
             let deck = deckr::read_pptx(&file)?;
             std::fs::create_dir_all(&out)?;
             let pages = deckr::render_deck_svgs(&deck);
             for (n, svg) in &pages {
                 std::fs::write(out.join(format!("slide_{n}.svg")), svg)?;
             }
-            std::fs::write(out.join("index.html"), gallery_html(&pages))?;
+            if png {
+                let mut written = 0usize;
+                for (n, svg) in &pages {
+                    match deckr::rasterise_svg(svg) {
+                        Ok(bytes) => {
+                            std::fs::write(out.join(format!("slide_{n}.png")), &bytes)?;
+                            written += 1;
+                        }
+                        Err(e) => eprintln!("  warning: could not rasterise slide {n}: {e}"),
+                    }
+                }
+                println!("  rasterised {written} slide(s) to PNG");
+            }
+            std::fs::write(out.join("index.html"), gallery_html(&pages, png))?;
             println!("rendered {} slide(s) to {}", pages.len(), out.display());
             println!("  open {}/index.html to preview", out.display());
         }
@@ -250,8 +266,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// A minimal gallery page that embeds each slide SVG for quick eyeballing.
-fn gallery_html(pages: &[(usize, String)]) -> String {
+/// A minimal gallery page that embeds each slide image for quick eyeballing.
+///
+/// When `use_png` is set the gallery references the rasterised `slide_N.png`
+/// (broadly viewable); otherwise it embeds the vector `slide_N.svg`.
+fn gallery_html(pages: &[(usize, String)], use_png: bool) -> String {
+    let ext = if use_png { "png" } else { "svg" };
     let mut body = String::from(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <title>deckr render</title>\
@@ -263,7 +283,7 @@ fn gallery_html(pages: &[(usize, String)]) -> String {
     );
     for (n, _) in pages {
         body.push_str(&format!(
-            "<figure><img src=\"slide_{n}.svg\" alt=\"slide {n}\">\
+            "<figure><img src=\"slide_{n}.{ext}\" alt=\"slide {n}\">\
              <figcaption>Slide {n}</figcaption></figure>"
         ));
     }
