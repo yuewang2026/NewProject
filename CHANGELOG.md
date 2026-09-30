@@ -128,6 +128,30 @@ headings inside it mark the phases, not releases.
   a deliberate non-Office `C00000`), OPC validity of the merged package,
   placeholder binding plus a read-back round trip, and byte-identical rebuilds.
 
+### Added — semantic diff (0.4)
+
+- `deckr diff old.pptx new.pptx` — compares two **decks**, not two zips. Slides
+  are aligned by presentation order, blocks paired by role, and the report
+  speaks in edits: "slide 2 title changed, one bullet added, table cell (3,2)
+  is now 4.1%", plus added/removed slides named by their titles. Exits 1 when
+  differences exist (like `diff(1)`), 0 when the decks are semantically
+  identical; `--json` emits the same change list as structured data.
+- Paragraph-level granularity for text: changed, added and removed bullets,
+  indent-level changes, and a separate `ParagraphFormattingChanged` kind when
+  the characters are identical but the character properties (bold, colour,
+  links) are not — the formatting fidelity 0.2 earned is diffable too.
+- Tables are compared cell by cell, with whole-row added/removed reports and a
+  `TableReshaped` verdict when a row's column count changed.
+- Pictures and charts are compared as media: replaced picture bytes, changed
+  alt text, chart captions, and byte-level chart content changes (charts stay
+  opaque until numeric extraction lands).
+- Page furniture (`footer` / `datetime` / `slide_number`) is deliberately
+  excluded — it regenerates from the master on rebuild and would be noise.
+- New public API: `diff_decks`, `diff_files`, `Change`, `DeckDiff` (the change
+  list is `Serialize`/`Deserialize`, so it travels through JSON). The IR types
+  `BlockContent`, `TextContent`, `Paragraph`, `ChartBlob` and `ChartPart` now
+  derive `PartialEq`, which the diff needs and callers may want.
+
 ### Known limitations
 
 - Charts are preserved **verbatim**, not decoded — their numbers are not
@@ -136,8 +160,7 @@ headings inside it mark the phases, not releases.
   a chart's data.
 - Diagrams (SmartArt) are detected and reported as skipped; they are not yet
   written back.
-- PDF rasterisation (PNG is shipped; PDF is not) and the semantic `diff` (0.4)
-  are not done yet.
+- PDF rasterisation (PNG is shipped; PDF is not) is not done yet.
 - Notes, animations, speaker notes masters and media beyond pictures are ignored.
 
 [Unreleased]: https://github.com/yuewang2026/deckr-pptx-oxide/compare/v0.1.0...HEAD

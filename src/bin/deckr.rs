@@ -76,6 +76,22 @@ enum Command {
         file: PathBuf,
     },
 
+    /// Compare two decks semantically.
+    ///
+    /// The comparison happens on the Deck IR, not on the zip: slides are
+    /// aligned by presentation order, blocks by role, text paragraph by
+    /// paragraph and tables cell by cell. Exits 1 when differences exist
+    /// (like diff(1)), 0 when the decks are semantically identical.
+    Diff {
+        /// The baseline .pptx.
+        old: PathBuf,
+        /// The deck to compare against it.
+        new: PathBuf,
+        /// Print the change list as JSON instead of a human report.
+        #[arg(short, long)]
+        json: bool,
+    },
+
     /// Render a deck to per-slide SVG (and optionally PNG) previews.
     ///
     /// Vector output (one `slide_N.svg` per slide plus a gallery `index.html`)
@@ -249,6 +265,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     "  ⚠ {} paragraph(s) differ after the round trip",
                     expected_paras.abs_diff(got_paras)
                 );
+            }
+        }
+
+        Command::Diff { old, new, json } => {
+            let diff = deckr::diff_files(&old, &new)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&diff)?);
+            } else {
+                print!(
+                    "{}",
+                    diff.to_text(&old.display().to_string(), &new.display().to_string())
+                );
+            }
+            if !diff.is_empty() {
+                std::process::exit(1);
             }
         }
 

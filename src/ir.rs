@@ -206,7 +206,7 @@ impl Block {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockContent {
     Text(TextContent),
@@ -256,7 +256,7 @@ pub enum BlockContent {
 /// re-emitted untouched. Deriving `Serialize`/`Deserialize` keeps charts
 /// portable through the JSON IR so they survive a `pptx -> json -> pptx`
 /// round trip rather than collapsing to `{"caption": null}`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChartBlob {
     /// The `a:graphicData/@uri` — `…/drawingml/2006/chart` distinguishes it
     /// from a diagram or OLE object.
@@ -270,7 +270,7 @@ pub struct ChartBlob {
 }
 
 /// One part of a chart's subgraph, verbatim.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChartPart {
     /// Part name within the package, e.g. `ppt/charts/chart1.xml`.
     pub path: String,
@@ -284,7 +284,7 @@ pub struct ChartPart {
 }
 
 /// A run of paragraphs belonging to one placeholder.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TextContent {
     pub paragraphs: Vec<Paragraph>,
 }
@@ -331,7 +331,7 @@ impl TextContent {
 /// `text` is always present as a flat concatenation of `runs`, so callers that
 /// only want characters never have to walk the runs. `runs` is what preserves
 /// bold, italic, colour, size and hyperlinks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Paragraph {
     pub level: u8,
     pub text: String,

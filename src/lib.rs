@@ -20,6 +20,7 @@
 //! ```
 
 pub mod build;
+pub mod diff;
 pub mod error;
 pub mod ir;
 pub mod markdown;
@@ -32,6 +33,7 @@ pub mod template;
 pub use build::{
     BuildReport, write_pptx, write_pptx_file, write_pptx_file_template, write_pptx_template,
 };
+pub use diff::{Change, DeckDiff, diff_decks, diff_files};
 pub use error::{Error, Result};
 pub use ir::{Block, BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};
 pub use md::parse_markdown;

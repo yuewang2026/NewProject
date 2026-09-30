@@ -97,8 +97,8 @@ Three things fall out of having a real IR instead of string munging:
 | `deckr convert` | done | `.pptx` → Markdown or JSON |
 | `deckr build` | done | Markdown or IR → `.pptx`, bound to the master by role — or to *your* template with `--template corp.potx` |
 | `deckr check` | done | round-trip a file and report exactly what did not survive |
-| `deckr render` | 0.3 | slide → SVG, or `--png` for real bitmaps (resvg, pure Rust) |
-| `deckr diff` | 0.4 | semantic diff between two decks |
+| `deckr render` | done | slide → SVG, or `--png` for real bitmaps (resvg, pure Rust) |
+| `deckr diff` | done | semantic diff between two decks |
 
 Already handled: titles and free-form text boxes, nested bullet levels, soft
 line breaks, tables, pictures (with alt text *and* their media bytes), charts
@@ -199,6 +199,17 @@ $ deckr build deck.md --template corp.potx -o deck.pptx
 # How much of the original survived?
 $ deckr check deck.pptx
 
+# What changed between two versions?
+$ deckr diff board-deck-v1.pptx board-deck-v2.pptx
+v1.pptx -> v2.pptx
+  slides: 7 -> 8
+  4 change(s):
+    slide 2: ~ title "Q2 Results" -> "Q3 Results"
+    slide 4: + body bullet (level 1) "ship the reader"
+    slide 5: ~ table cell (3,2) "3" -> "4.1%"
+    slide 8: + slide "Thanks"
+$ deckr diff a.pptx b.pptx --json      # the same change list as JSON
+
 # Actually look at it — one SVG per slide plus a gallery page.
 $ deckr render deck.pptx
 rendered 23 slide(s) to deckr_render
@@ -249,8 +260,8 @@ would bake a duplicate into the file.
 No PowerPoint and no LibreOffice is involved anywhere in CI, so "it opens" has
 to be proved structurally. Two layers:
 
-- 65 tests — 53 unit, 7 integration against the generated fixture, 4 covering
-  the `.potx` template-reuse feature, 1 doctest.
+- 80 tests — 63 unit, 7 integration against the generated fixture, 4 covering
+  the `.potx` template-reuse feature, 5 covering the semantic diff, 1 doctest.
 - `tests/fixtures/validate_pptx.py`, a standard-library-only checker that treats every generated `.pptx` as an OPC package and asserts all seven properties a consumer actually relies on: every XML part parses, every declared part exists, every part is declared, every internal relationship resolves, every `r:id` referenced in XML is defined, the presentation's slide list resolves, and shape ids are unique within each slide.
 
 It lives outside the Rust tests on purpose. When it fails, the bug is in our
@@ -422,8 +433,8 @@ deckr 的立场相反：**不允许你指定几何位置，只允许你声明语
 | `deckr convert` | 已完成 | `.pptx` → Markdown 或 JSON |
 | `deckr build` | 已完成 | Markdown 或 IR → `.pptx`，按角色绑回母版 —— 也可用 `--template corp.potx` 绑到*你的*模板 |
 | `deckr check` | 已完成 | 往返一个文件，逐项报告哪些内容没能存活 |
-| `deckr render` | 0.3 | 页面 → SVG，或加 `--png` 出真实位图（resvg，纯 Rust） |
-| `deckr diff` | 0.4 | 两份 deck 的语义 diff |
+| `deckr render` | 已完成 | 页面 → SVG，或加 `--png` 出真实位图（resvg，纯 Rust） |
+| `deckr diff` | 已完成 | 两份 deck 的语义 diff |
 
 已支持：标题与自由文本框、多层缩进的项目符号、软换行、表格、图片（含 alt
 文本与媒体字节）、图表（原样捕获，含内嵌工作簿）、空占位符、页眉页码等页面装饰、
@@ -516,6 +527,17 @@ $ deckr build deck.md --template corp.potx -o deck.pptx
 # 原稿有多少活着回来了？
 $ deckr check deck.pptx
 
+# 两个版本之间变了什么？
+$ deckr diff v1.pptx v2.pptx
+v1.pptx -> v2.pptx
+  slides: 7 -> 8
+  4 change(s):
+    slide 2: ~ title "Q2 Results" -> "Q3 Results"
+    slide 4: + body bullet (level 1) "ship the reader"
+    slide 5: ~ table cell (3,2) "3" -> "4.1%"
+    slide 8: + slide "Thanks"
+$ deckr diff a.pptx b.pptx --json      # 同一份变更列表的 JSON 输出
+
 # 真的看一眼 —— 每页一个 SVG，外加一个画廊页。
 $ deckr render deck.pptx
 rendered 23 slide(s) to deckr_render
@@ -565,8 +587,8 @@ Read it. Diff it. Build it back.
 CI 里全程没有 PowerPoint，也没有 LibreOffice，所以「打得开」只能靠结构证明。
 两层保障：
 
-- 65 个测试 —— 53 个单元测试、7 个针对生成 fixture 的集成测试、4 个覆盖 `.potx`
-  模板复用功能的集成测试、1 个文档测试。
+- 80 个测试 —— 63 个单元测试、7 个针对生成 fixture 的集成测试、4 个覆盖 `.potx`
+  模板复用功能的集成测试、5 个覆盖语义 diff 的集成测试、1 个文档测试。
 - `tests/fixtures/validate_pptx.py`，一个只用标准库的校验器。它把每个生成的 `.pptx` 当作 OPC 包来查，断言七项真正会被消费方依赖的性质：每个 XML part 能解析、声明的 part 都存在、存在的 part 都被声明、每个内部关系都能落地、XML 里引用的每个 `r:id` 都有定义、presentation 的页序能解析、以及每页内 shape id 不重复。
 
 它刻意放在 Rust 测试之外。当它报错时，问题出在我们对 OPC 的理解上，而不是在我们
