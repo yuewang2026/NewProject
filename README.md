@@ -4,7 +4,7 @@
 
 **Read, write and account for PowerPoint decks — without PowerPoint, without LibreOffice, without Python.**
 
-[![CI](https://github.com/yuewang2026/NewProject/actions/workflows/ci.yml/badge.svg)](https://github.com/yuewang2026/NewProject/actions/workflows/ci.yml)
+[![CI](https://github.com/yuewang2026/deckr-pptx-oxide/actions/workflows/ci.yml/badge.svg)](https://github.com/yuewang2026/deckr-pptx-oxide/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
 
@@ -147,8 +147,8 @@ dropped its caption. Both came from running against a real file.
 ## Install
 
 ```sh
-git clone https://github.com/yuewang2026/NewProject
-cd NewProject
+git clone https://github.com/yuewang2026/deckr-pptx-oxide
+cd deckr-pptx-oxide
 cargo build --release
 # target/release/deckr
 ```
@@ -306,7 +306,7 @@ MIT — see [LICENSE](LICENSE).
 
 **读取、写回、并交代清楚每一页 PowerPoint —— 不需要装 PowerPoint，不需要 LibreOffice，也不需要 Python。**
 
-[![CI](https://github.com/yuewang2026/NewProject/actions/workflows/ci.yml/badge.svg)](https://github.com/yuewang2026/NewProject/actions/workflows/ci.yml)
+[![CI](https://github.com/yuewang2026/deckr-pptx-oxide/actions/workflows/ci.yml/badge.svg)](https://github.com/yuewang2026/deckr-pptx-oxide/actions/workflows/ci.yml)
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
 
@@ -441,8 +441,8 @@ bugfix：相邻 run 之间的空格被吞掉了；以及「标题 + 副标题 + 
 ## 安装
 
 ```sh
-git clone https://github.com/yuewang2026/NewProject
-cd NewProject
+git clone https://github.com/yuewang2026/deckr-pptx-oxide
+cd deckr-pptx-oxide
 cargo build --release
 # target/release/deckr
 ```

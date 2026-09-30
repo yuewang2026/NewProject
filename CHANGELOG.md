@@ -115,4 +115,4 @@ headings inside it mark the phases, not releases.
   and the semantic `diff` (0.4) are not done yet.
 - Notes, animations, speaker notes masters and media beyond pictures are ignored.
 
-[Unreleased]: https://github.com/yuewang2026/NewProject/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yuewang2026/deckr-pptx-oxide/compare/v0.1.0...HEAD
