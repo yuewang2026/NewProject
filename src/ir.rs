@@ -210,20 +210,77 @@ impl Block {
 #[serde(rename_all = "snake_case")]
 pub enum BlockContent {
     Text(TextContent),
+    /// An embedded picture. `data` is the raw bytes; when present the writer
+    /// drops the file into `ppt/media/` and binds a `<p:pic>`. `embed` is a
+    /// read-side scratch field — the relationship id the source used — and is
+    /// resolved to `data` before the deck is returned, so callers never see it.
     Picture {
         alt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "base64_opt")]
+        data: Option<Vec<u8>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime: Option<String>,
+        #[serde(skip)]
+        embed: Option<String>,
     },
     Table {
         rows: Vec<Vec<String>>,
     },
-    /// Phase 0.2 still renders charts as a caption; numeric extraction is 0.4.
+    /// A chart, preserved verbatim rather than understood. `blob` holds the
+    /// original `<c:chart>` element and every part its relationship graph
+    /// reaches (the chart XML, its rels, the embedded workbook, any theme it
+    /// references). It is serialised through the JSON IR so charts survive a
+    /// `pptx -> json -> pptx` round trip unchanged; `rid`/`uri` are read-side
+    /// scratch and are not carried in JSON, because `blob` already owns `uri`
+    /// and the writer re-derives the id from `blob.chart_xml`. The writer
+    /// ignores a chart whose `blob` is `None`.
     Chart {
         caption: Option<String>,
+        #[serde(default)]
+        blob: Option<ChartBlob>,
+        #[serde(skip)]
+        rid: Option<String>,
+        #[serde(skip)]
+        uri: Option<String>,
     },
     Diagram {
         caption: Option<String>,
     },
     Empty,
+}
+
+/// Everything a chart needs to be written back exactly as it came in.
+///
+/// Charts are not parsed into a data model (that is numeric extraction, a
+/// later phase); instead the whole subgraph is carried as opaque bytes and
+/// re-emitted untouched. Deriving `Serialize`/`Deserialize` keeps charts
+/// portable through the JSON IR so they survive a `pptx -> json -> pptx`
+/// round trip rather than collapsing to `{"caption": null}`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChartBlob {
+    /// The `a:graphicData/@uri` — `…/drawingml/2006/chart` distinguishes it
+    /// from a diagram or OLE object.
+    pub uri: String,
+    /// The `<c:chart …/>` element exactly as read, including its original
+    /// `r:id`; the writer remaps that id to a fresh one before emitting.
+    pub chart_xml: String,
+    /// Every part reached by walking the chart's relationships: the chart XML,
+    /// its `.rels`, the embedded workbook, and any theme/style it references.
+    pub parts: Vec<ChartPart>,
+}
+
+/// One part of a chart's subgraph, verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChartPart {
+    /// Part name within the package, e.g. `ppt/charts/chart1.xml`.
+    pub path: String,
+    /// The part's bytes, base64-encoded in JSON so a chart subgraph (an
+    /// embedded workbook included) travels as one self-contained document.
+    #[serde(with = "base64_bytes")]
+    pub bytes: Vec<u8>,
+    /// Its content type, copied from the source `[Content_Types].xml` so the
+    /// writer can register an Override for it.
+    pub content_type: String,
 }
 
 /// A run of paragraphs belonging to one placeholder.
@@ -364,6 +421,56 @@ impl Run {
     }
 }
 
+/// Transparent base64 (de)serialisation for `Option<Vec<u8>>`.
+///
+/// `None` stays `null`; `Some(bytes)` becomes a base64 string. This keeps
+/// pictures portable through the JSON IR without a separate sidecar file.
+mod base64_opt {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(bytes) => {
+                s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+            }
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+        let text = Option::<String>::deserialize(d)?;
+        match text {
+            Some(encoded) => base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Transparent base64 (de)serialisation for `Vec<u8>` — no `Option` layer.
+///
+/// Used by `ChartPart::bytes`, where a part always has bytes. Serialising as a
+/// base64 string keeps a chart's embedded workbook portable through the JSON
+/// IR alongside the picture bytes handled by `base64_opt`.
+mod base64_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(value))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,11 +527,9 @@ mod tests {
         let json = r#"{"index":0,"blocks":[{"role":"title","content":{"text":{"paragraphs":[{"level":0,"text":"Hello"}]}}}]}"#;
         let slide: Slide = serde_json::from_str(json).expect("deserialises");
         assert_eq!(slide.title().as_deref(), Some("Hello"));
-        assert!(
-            slide.blocks[0].as_text().unwrap().paragraphs[0]
-                .runs
-                .is_empty()
-        );
+        assert!(slide.blocks[0].as_text().unwrap().paragraphs[0]
+            .runs
+            .is_empty());
         assert_eq!(
             slide.blocks[0].as_text().unwrap().paragraphs[0].display_runs(),
             vec![Run::new("Hello")]

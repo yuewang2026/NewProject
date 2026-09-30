@@ -53,6 +53,23 @@ headings inside it mark the phases, not releases.
 - `examples/roundtrip.rs` — the README's library snippet, compiled by CI so the
   documentation cannot rot.
 
+### Added — media fidelity (0.2)
+
+- **Pictures survive round trips.** `BlockContent::Picture` now carries the raw
+  media bytes and MIME type; the reader resolves the `r:embed` relationship to
+  the `ppt/media/` part and loads it, and the writer drops the file back into the
+  package as a `<p:pic>` with a freshly assigned relationship id.
+- **Charts survive round trips, verbatim.** A chart's whole relationship
+  subgraph — the chart XML, its `.rels`, and the embedded workbook — is captured
+  as opaque bytes (`ChartBlob` / `ChartPart`) and re-emitted untouched. The
+  writer remaps the `<c:chart>` `r:id` onto a fresh relationship and re-registers
+  the content types, so the rebuilt chart still opens.
+- **Both travel through the JSON IR.** Picture `data` is base64-encoded inline;
+  the chart `blob` (including the embedded-workbook bytes) is serialised too, so
+  `pptx → json → pptx` is lossless for media, not just `pptx → pptx`.
+- `deckr check` now reports **zero unplaceable blocks** on a deck that carries a
+  real picture and a real chart, which was the headline goal of this phase.
+
 ### Fixed
 
 - Spaces between adjacent text runs were being swallowed, so `"Hello & welcome"`
@@ -71,11 +88,13 @@ headings inside it mark the phases, not releases.
 ### Known limitations
 
 - Your own `.potx` template is not yet reusable; `parts.rs` ships one theme.
-- Charts and diagrams are detected, not decoded — their numbers are not extracted
-  and they are not written back. Reported as skipped, never drawn empty.
-- Pictures are detected with their alt text, but their media is not carried
-  through a round trip. Same reporting policy.
+- Charts are preserved **verbatim**, not decoded — their numbers are not
+  extracted into the IR (that is the later numeric-extraction phase). The chart
+  is written back exactly as read, so nothing is lost, but deckr cannot yet edit
+  a chart's data.
+- Diagrams (SmartArt) are detected and reported as skipped; they are not yet
+  written back.
 - `render` (0.3) and `diff` (0.4) do not exist yet.
-- Notes, animations, speaker notes masters and media are ignored.
+- Notes, animations, speaker notes masters and media beyond pictures are ignored.
 
 [Unreleased]: https://github.com/yuewang2026/NewProject/compare/v0.1.0...HEAD

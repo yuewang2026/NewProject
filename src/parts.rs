@@ -308,6 +308,7 @@ pub fn presentation_xml(slide_count: usize) -> String {
 }
 
 /// Relationships of one part, in file order.
+#[derive(Clone)]
 pub struct Rel {
     pub id: String,
     pub ty: &'static str,
@@ -316,7 +317,7 @@ pub struct Rel {
 }
 
 impl Rel {
-    fn internal(id: String, ty: &'static str, target: String) -> Self {
+    pub fn internal(id: String, ty: &'static str, target: String) -> Self {
         Self {
             id,
             ty,
@@ -383,21 +384,14 @@ pub fn master_rels_xml(layout_count: usize) -> String {
     xml_header() + &rel_package_xml(&rels)
 }
 
-pub fn slide_rels_xml(layout_index: usize, links: &[String]) -> String {
-    let mut rels = vec![Rel::internal(
+pub fn slide_rels_xml(layout_index: usize, rels: &[Rel]) -> String {
+    let mut all = vec![Rel::internal(
         "rId1".into(),
         TY_LAYOUT,
         format!("../slideLayouts/slideLayout{}.xml", layout_index + 1),
     )];
-    for (i, target) in links.iter().enumerate() {
-        rels.push(Rel {
-            id: format!("rId{}", i + 2),
-            ty: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
-            target: target.clone(),
-            external: true,
-        });
-    }
-    xml_header() + &rel_package_xml(&rels)
+    all.extend(rels.iter().cloned());
+    xml_header() + &rel_package_xml(&all)
 }
 
 fn rel_package_xml(rels: &[Rel]) -> String {
@@ -422,7 +416,11 @@ fn rel_package_xml(rels: &[Rel]) -> String {
     out
 }
 
-pub fn content_types_xml(slide_count: usize, layout_count: usize) -> String {
+pub fn content_types_xml(
+    slide_count: usize,
+    layout_count: usize,
+    extra: &[(String, String)],
+) -> String {
     let mut out = String::from(concat!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
         "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">",
@@ -450,6 +448,13 @@ pub fn content_types_xml(slide_count: usize, layout_count: usize) -> String {
                 " ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
             ),
             i = i + 1
+        ));
+    }
+    for (partname, ct) in extra {
+        out.push_str(&format!(
+            concat!("<Override PartName=\"/{name}\"", " ContentType=\"{ct}\"/>"),
+            name = partname.trim_start_matches('/'),
+            ct = ct,
         ));
     }
     out.push_str("</Types>");

@@ -27,7 +27,7 @@ pub mod md;
 pub mod ooxml;
 pub mod parts;
 
-pub use build::{BuildReport, write_pptx, write_pptx_file};
+pub use build::{write_pptx, write_pptx_file, BuildReport};
 pub use error::{Error, Result};
 pub use ir::{Block, BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};
 pub use md::parse_markdown;

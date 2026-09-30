@@ -103,6 +103,9 @@ fn parse_slide(index: usize, lines: &[&str]) -> Slide {
                 role: Role::Picture,
                 content: BlockContent::Picture {
                     alt: Some(alt.to_string()),
+                    data: None,
+                    mime: None,
+                    embed: None,
                 },
             });
             i += 1;
@@ -112,7 +115,12 @@ fn parse_slide(index: usize, lines: &[&str]) -> Slide {
         if trimmed == "`[chart]`" {
             blocks.push(Block {
                 role: Role::Chart,
-                content: BlockContent::Chart { caption: None },
+                content: BlockContent::Chart {
+                    caption: None,
+                    blob: None,
+                    rid: None,
+                    uri: None,
+                },
             });
             i += 1;
             continue;

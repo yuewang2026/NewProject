@@ -114,3 +114,118 @@ fn json_round_trips() {
     assert_eq!(back.len(), deck.len());
     assert_eq!(back.outline(), deck.outline());
 }
+
+/// Pictures and charts must survive `pptx -> json -> pptx` unchanged — the
+/// whole point of the media-fidelity work. This guards against a regression
+/// that silently drops a chart to `{"caption": null}` on the JSON hop.
+#[test]
+fn pictures_and_charts_survive_a_json_round_trip() {
+    let Some(deck) = load() else { return };
+    // The first presented slide (slide2.xml) carries both.
+    let slide = &deck.slides[0];
+    let pic = slide
+        .blocks
+        .iter()
+        .find(|b| b.role == Role::Picture)
+        .expect("a picture block");
+    let chart = slide
+        .blocks
+        .iter()
+        .find(|b| b.role == Role::Chart)
+        .expect("a chart block");
+
+    // The picture carries its real bytes.
+    match &pic.content {
+        BlockContent::Picture {
+            data: Some(bytes),
+            mime,
+            ..
+        } => {
+            assert_eq!(mime.as_deref(), Some("image/png"));
+            assert!(!bytes.is_empty(), "picture bytes must not be empty");
+        }
+        other => panic!("expected a picture with bytes, got {other:?}"),
+    }
+
+    // The chart carries the whole verbatim subgraph: chart XML, its `.rels`,
+    // and the embedded workbook.
+    let parts = match &chart.content {
+        BlockContent::Chart {
+            blob: Some(blob), ..
+        } => &blob.parts,
+        other => panic!("expected a chart with a captured blob, got {other:?}"),
+    };
+    let names: Vec<&str> = parts.iter().map(|p| p.path.as_str()).collect();
+    assert!(names.contains(&"ppt/charts/chart1.xml"), "{names:?}");
+    assert!(
+        names.contains(&"ppt/charts/_rels/chart1.xml.rels"),
+        "{names:?}"
+    );
+    assert!(
+        names.contains(&"ppt/embeddings/workbook1.xlsx"),
+        "{names:?}"
+    );
+
+    // The blob must travel through the JSON IR and come back byte-identical.
+    let json = deckr::to_json(&deck).expect("serialises");
+    assert!(
+        json.contains("\"blob\""),
+        "chart blob must be carried in JSON"
+    );
+    let back = deckr::from_json(&json).expect("deserialises");
+    let back_chart = back.slides[0]
+        .blocks
+        .iter()
+        .find(|b| b.role == Role::Chart)
+        .expect("chart survives JSON");
+    match &back_chart.content {
+        BlockContent::Chart {
+            blob: Some(blob), ..
+        } => {
+            let back_names: Vec<&str> = blob.parts.iter().map(|p| p.path.as_str()).collect();
+            assert_eq!(back_names, names, "subgraph parts must survive JSON");
+            for (a, b) in parts.iter().zip(blob.parts.iter()) {
+                assert_eq!(
+                    a.bytes, b.bytes,
+                    "part {} must be byte-identical through JSON",
+                    a.path
+                );
+            }
+        }
+        other => panic!("chart blob lost through JSON: {other:?}"),
+    }
+}
+
+/// The writer must drop the captured media back into the package so the result
+/// re-opens. Reading it back must still yield a chart with a blob and a picture
+/// with bytes — i.e. the round trip is lossless end to end.
+#[test]
+fn picture_and_chart_round_trip_through_a_written_file() {
+    let Some(deck) = load() else { return };
+    let dir = std::env::temp_dir().join(format!("deckr-media-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    let out = dir.join("out.pptx");
+    deckr::write_pptx_file(&deck, &out).expect("writes a package");
+
+    let back = deckr::read_pptx(&out).expect("the written package re-opens");
+    let pic = back.slides[0]
+        .blocks
+        .iter()
+        .find(|b| b.role == Role::Picture)
+        .expect("picture survives the write");
+    assert!(
+        matches!(pic.content, BlockContent::Picture { data: Some(_), .. }),
+        "picture bytes must be written back"
+    );
+    let chart = back.slides[0]
+        .blocks
+        .iter()
+        .find(|b| b.role == Role::Chart)
+        .expect("chart survives the write");
+    assert!(
+        matches!(chart.content, BlockContent::Chart { blob: Some(_), .. }),
+        "chart subgraph must be written back"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

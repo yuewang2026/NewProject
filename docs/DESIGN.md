@@ -55,7 +55,9 @@ The current behaviour is a three-way verdict, surfaced separately in
 |---|---|---|
 | a placeholder of this role exists | bind to it: full inheritance | `blocks_written` |
 | no placeholder of this role exists | write it as a loose shape — the words survive, the master's styling does not | `relocated` |
-| the content cannot be represented at all (chart XML, picture media) | do not write it, do not pretend | `skipped` |
+| picture with captured bytes | written verbatim from the PNG/JPEG data, bound to the picture placeholder (no coordinates — the master owns placement) | `blocks_written` |
+| chart with captured `ChartBlob` | written verbatim — the whole relationship-reached subgraph (chart XML + `.rels` + embedded workbook) rounds-trips intact | `blocks_written` |
+| diagram / SmartArt | not representable in the IR yet — recorded as skipped, not faked | `skipped` |
 
 One detail in the loose case is load-bearing. A loose shape must carry **no**
 `<p:ph>` element, not an empty one: ECMA-376 §19.3.1.25 says a `<p:ph/>` with no
@@ -97,9 +99,11 @@ separation between *content survived* (paragraph count) and *binding survived*
 interesting half of the answer.
 
 Current figure on the committed fixture: **8/8 paragraphs, 2/2 titles, 2/2
-slides, 1 relocated, 2 skipped** — see the README for the exact transcript. We
-publish it per fixture the way `pdf_oxide` publishes its render pass rate. Any
-feature that cannot be measured this way should be treated with suspicion.
+slides, unplaceable: none** — see the README for the exact transcript. The two
+blocks that earlier counted as `skipped` (a picture and a chart) now round-trip
+verbatim, which is the whole point of the 0.2 media-fidelity work. We publish it
+per fixture the way `pdf_oxide` publishes its render pass rate. Any feature that
+cannot be measured this way should be treated with suspicion.
 
 ## 3. Slide order comes from `presentation.xml`, never from filenames
 
@@ -158,7 +162,7 @@ the benefit is that the diff command has something to say.
 Neither PowerPoint nor LibreOffice appears in CI, so "it opens" must be proved
 structurally. Two layers, kept deliberately separate:
 
-- **Rust tests** prove deckr agrees with itself: 45 unit, 5 integration against the generated fixture, 1 doctest.
+- **Rust tests** prove deckr agrees with itself: 45 unit, 7 integration against the generated fixture (2 of them cover picture + chart survival), 1 doctest.
 - **`tests/fixtures/validate_pptx.py`** treats a generated package as an OPC package and asserts seven properties consumers actually depend on: every XML part parses, every declared part exists, every part is declared, every internal relationship resolves, every `r:id` referenced in XML is defined, the presentation's slide list resolves, and shape ids are unique within a slide.
 
 The second layer is Python and lives outside the Rust tests on purpose. When it
@@ -174,19 +178,29 @@ The fixture generator is itself validated by the validator. A fixture that lies
 about how real packages hang together would teach every other test the wrong
 lesson.
 
-## 7. Charts are a different problem and get their own phase
+## 7. Charts survive verbatim, but their numbers stay encoded
 
 A chart in a PPTX is a `graphicFrame` pointing at an embedded workbook. The
 *numbers* live in `ppt/charts/chartN.xml` and its embedded spreadsheet, not in
-the picture people see. That is why `BlockContent::Chart { caption: None }` exists
-and currently holds nothing: recording "there is a chart here" is already more
-than any Markdown converter does, and restoring `ChartData` (series × categories
-→ values) is what enables both vector redraw in `render` and real numbers in the
-Markdown export.
+the picture people see. That makes a chart a small OPC package of its own: the
+chart XML, its `_rels/chartN.xml.rels`, and every part that relationship graph
+reaches — most often `ppt/embeddings/workbookN.xlsx`.
 
-Until that lands, charts land in `skipped` rather than being drawn as an empty
-frame. An empty rectangle that looks like a rendering bug is worse than an honest
-line of text.
+We do **not** decode any of it. `ChartBlob` carries the *whole* relationship-
+reached subgraph as opaque bytes, and the writer remaps the `<c:chart>` r:id,
+re-registers content types, and streams the bytes back unchanged. The result is
+a chart that reopens in PowerPoint intact and is reported as `blocks_written`,
+not `skipped` — so `deckr check` on a real, chart-bearing deck reads
+`unplaceable blocks: none`. The enhanced fixture carries exactly such a subgraph
+(chart1.xml + its `.rels` + an embedded workbook), and the integration tests
+assert byte-identity of all three parts through both `pptx → json → pptx` and
+`pptx → pptx`.
+
+What stays deferred to 0.4 is *semantic* access to the numbers: turning
+`ChartBlob` into `ChartData` (series × categories → values) is what eventually
+enables real numbers in the Markdown export and vector redraw in `render`. Until
+then, a chart is a faithful but opaque block: an honest, byte-exact copy, not an
+empty frame masquerading as a render.
 
 ## 8. What we deliberately do not do (yet)
 
@@ -194,9 +208,9 @@ line of text.
 |---|---|---|
 | Reuse your `.potx` template | `parts.rs` ships one theme; real picking/extraction needs a layout inventory | 0.3 |
 | Render to PDF/PNG | Borrowing Typst first; a native `cosmic-text + resvg` backend later | 0.3 |
-| Read chart numbers | Needs chart XML + embedded workbook | 0.4 |
+| Read chart numbers | Capture ships in 0.2; decoding the `ChartBlob` into `ChartData` is a separate pass | 0.4 |
 | Semantic diff between decks | Needs both halves first; they now exist | 0.4 |
-| Notes, animations, media | Real, but low value per line of code | later |
+| Notes, animations, audio/video | Real, but lower value per line of code now that picture + chart media round-trip | later |
 
 ## Crate layout (today)
 

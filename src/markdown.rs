@@ -38,7 +38,7 @@ fn render_slide(out: &mut String, slide: &Slide) {
         match &block.content {
             BlockContent::Text(t) => render_text(out, block.role, t),
             BlockContent::Table { rows } => out.push_str(&render_table(rows)),
-            BlockContent::Picture { alt } => {
+            BlockContent::Picture { alt, .. } => {
                 // TODO(0.4): resolve the real media filename from the slide's
                 // relationship part instead of pointing at a placeholder.
                 let alt = alt.clone().unwrap_or_else(|| "image".to_string());
@@ -86,7 +86,11 @@ fn render_text(out: &mut String, role: Role, text: &TextContent) {
         for (i, line) in body.lines().enumerate() {
             let marker = if bulleted {
                 // Continuation lines of a soft-broken bullet hang in.
-                if i == 0 { "- " } else { "  " }
+                if i == 0 {
+                    "- "
+                } else {
+                    "  "
+                }
             } else {
                 ""
             };

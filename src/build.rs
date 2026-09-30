@@ -14,12 +14,12 @@
 use std::io::{Seek, Write};
 use std::path::Path;
 
-use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
+use zip::CompressionMethod;
 
 use crate::error::{Error, Result};
-use crate::ir::{BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};
-use crate::parts;
+use crate::ir::{BlockContent, ChartBlob, Deck, Paragraph, Role, Run, Slide, TextContent};
+use crate::parts::{self, Rel};
 
 /// Height of one table row: 0.405in, Office's own default.
 const ROW_HEIGHT: i64 = 370_332;
@@ -33,6 +33,30 @@ const CONTENT_SLOT_HALF: i64 = 2_100_000;
 /// Line box used to size text that has no placeholder to inherit a height from.
 /// The shape carries `normAutofit`, so this only has to be roughly right.
 const LINE_HEIGHT: i64 = 320_000;
+/// Default size for an embedded picture when the source gave us no geometry:
+/// five by three inches — on the slide and out of the way of the title.
+const PIC_WIDTH: i64 = 4_572_000;
+const PIC_HEIGHT: i64 = 2_743_200;
+/// Default size for an embedded chart frame.
+const CHART_WIDTH: i64 = 7_000_000;
+const CHART_HEIGHT: i64 = 4_000_000;
+
+const TY_IMAGE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+const TY_CHART: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+const TY_HYPERLINK: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
+
+/// Parts the writer discovers while serialising slides, written once the slide
+/// loop is done. Pictures and charts carry binary media that the IR only
+/// resolves at write time, so their files cannot exist before the slides that
+/// name them.
+#[derive(Default)]
+struct Pending {
+    /// `(package path, content type, bytes)` for media and chart subgraph parts.
+    binaries: Vec<(String, String, Vec<u8>)>,
+    /// Extra `[Content_Types]` overrides: `(partname, content type)`.
+    types: Vec<(String, String)>,
+}
 
 /// What came out of a build, including everything that could not be placed.
 #[derive(Debug, Default)]
@@ -78,6 +102,18 @@ pub fn write_pptx<W: Write + Seek>(deck: &Deck, sink: W) -> Result<BuildReport> 
         ..Default::default()
     };
 
+    // Pass 1: turn every slide into XML and discover the binary parts and
+    // extra relationships it needs. Pictures and charts carry bytes the IR
+    // only resolves here, so their files cannot exist before this pass.
+    let mut pending = Pending::default();
+    let mut slides: Vec<(usize, String, LinkTable, Vec<Rel>)> = Vec::with_capacity(slide_count);
+    for slide in &deck.slides {
+        let layout_index = layout_for(slide);
+        let mut extra = Vec::new();
+        let (body, links) = slide_xml(slide, layout_index, &mut report, &mut extra, &mut pending);
+        slides.push((layout_index, body, links, extra));
+    }
+
     // Every part of the package shares one timestamp, so two builds of the same
     // deck are byte-identical and therefore diffable.
     let stamped = SimpleFileOptions::default()
@@ -90,7 +126,7 @@ pub fn write_pptx<W: Write + Seek>(deck: &Deck, sink: W) -> Result<BuildReport> 
         &mut zip,
         stamped,
         "[Content_Types].xml",
-        &parts::content_types_xml(slide_count, layouts.len()),
+        &parts::content_types_xml(slide_count, layouts.len(), &pending.types),
     )?;
     put(&mut zip, stamped, "_rels/.rels", &parts::root_rels_xml())?;
     put(
@@ -148,22 +184,37 @@ pub fn write_pptx<W: Write + Seek>(deck: &Deck, sink: W) -> Result<BuildReport> 
         )?;
     }
 
-    for (i, slide) in deck.slides.iter().enumerate() {
-        let layout_index = layout_for(slide);
-        let mut table = LinkTable::default();
-        let body = slide_xml(slide, layout_index, &mut table, &mut report);
+    for (i, (layout_index, body, links, extra)) in slides.iter().enumerate() {
         put(
             &mut zip,
             stamped,
             &format!("ppt/slides/slide{}.xml", i + 1),
-            &body,
+            body,
         )?;
+        let mut rels: Vec<Rel> = links
+            .links
+            .iter()
+            .enumerate()
+            .map(|(j, target)| Rel {
+                id: format!("rId{}", j + 2),
+                ty: TY_HYPERLINK,
+                target: target.clone(),
+                external: true,
+            })
+            .collect();
+        rels.extend(extra.iter().cloned());
         put(
             &mut zip,
             stamped,
             &format!("ppt/slides/_rels/slide{}.xml.rels", i + 1),
-            &parts::slide_rels_xml(layout_index, &table.links),
+            &parts::slide_rels_xml(*layout_index, &rels),
         )?;
+    }
+
+    // Binary media and chart-subgraph parts, written last so their names are
+    // known once every slide that references them has been serialised.
+    for (path, ct, bytes) in &pending.binaries {
+        put_binary(&mut zip, stamped, path, ct, bytes)?;
     }
 
     zip.finish().map_err(|e| Error::Io {
@@ -234,15 +285,17 @@ fn placeholder_for(layout_index: usize, role: Role) -> Option<&'static str> {
 fn slide_xml(
     slide: &Slide,
     layout_index: usize,
-    links: &mut LinkTable,
     report: &mut BuildReport,
-) -> String {
+    extra: &mut Vec<Rel>,
+    pending: &mut Pending,
+) -> (String, LinkTable) {
     let layouts = parts::layouts();
     let layout = &layouts[layout_index];
 
     let mut shapes = String::new();
     // Shape id 1 belongs to the shape tree itself.
     let mut next_id = 2u32;
+    let mut links = LinkTable::default();
     // Decide up front where unbound content starts. If some block is about to
     // claim the content placeholder, loose shapes begin below it rather than on
     // top of it; otherwise they begin at the top of the content area, advancing
@@ -256,6 +309,12 @@ fn slide_xml(
         .placeholder("body")
         .filter(|_| claims_content_slot)
         .map_or(CONTENT_TOP, |ph| ph.y + CONTENT_SLOT_HALF);
+
+    // Pictures and charts need their own relationship ids, assigned only after
+    // every hyperlink has claimed its rId — so they are buffered here and
+    // emitted below once we know how many links the slide holds.
+    let mut pictures: Vec<(Vec<u8>, Option<String>, Option<String>)> = Vec::new();
+    let mut charts: Vec<ChartBlob> = Vec::new();
 
     for block in &slide.blocks {
         if block.is_empty() || block.role.is_chrome() {
@@ -279,7 +338,7 @@ fn slide_xml(
                             ph_type,
                             ph,
                             t,
-                            links,
+                            &mut links,
                         ));
                         next_id += 1;
                         report.blocks_written += 1;
@@ -301,7 +360,7 @@ fn slide_xml(
                                 cy: height,
                             },
                             t,
-                            links,
+                            &mut links,
                         ));
                         free_top += height;
                         next_id += 1;
@@ -323,22 +382,94 @@ fn slide_xml(
                 next_id += 1;
                 report.blocks_written += 1;
             }
-            // Round-tripping pictures and charts means carrying their media
-            // parts; until 0.4 does that, saying so beats emitting a shape that
-            // renders as an empty frame.
-            BlockContent::Picture { .. } => report.skipped.push(format!(
-                "slide {}: pictures need media extraction (0.4)",
+            // A picture with bytes becomes a <p:pic>; without bytes it is
+            // reported rather than faked.
+            BlockContent::Picture {
+                data: Some(bytes),
+                mime,
+                alt,
+                ..
+            } => {
+                pictures.push((bytes.clone(), mime.clone(), alt.clone()));
+            }
+            BlockContent::Picture { data: None, .. } => report.skipped.push(format!(
+                "slide {}: picture has no media to embed",
                 slide.index + 1
             )),
-            BlockContent::Chart { .. } | BlockContent::Diagram { .. } => {
-                report.skipped.push(format!(
-                    "slide {}: {}-blocks need chart XML (0.4)",
-                    slide.index + 1,
-                    block.role
-                ))
-            }
+            // A chart with its captured subgraph is re-emitted verbatim;
+            // without one it stays unplaceable.
+            BlockContent::Chart {
+                blob: Some(blob), ..
+            } => charts.push(blob.clone()),
+            BlockContent::Chart { blob: None, .. } => report.skipped.push(format!(
+                "slide {}: chart has no captured part to write back",
+                slide.index + 1
+            )),
+            BlockContent::Diagram { .. } => report.skipped.push(format!(
+                "slide {}: diagrams (SmartArt) are not yet supported",
+                slide.index + 1
+            )),
             BlockContent::Empty => {}
         }
+    }
+
+    // Relationship ids for media and charts follow the hyperlinks, which end at
+    // rId(1 + links). Computing this after the loop keeps ids stable.
+    let mut next_rid = 2 + links.links.len() as u32;
+    for (media_seq, (bytes, mime, alt)) in (1u32..).zip(pictures) {
+        let ext = ext_for_mime(&mime);
+        let file = format!("image{media_seq}.{ext}");
+        let rid = format!("rId{next_rid}");
+        next_rid += 1;
+        let path = format!("ppt/media/{file}");
+        let ct = mime.unwrap_or_else(|| "application/octet-stream".to_string());
+        pending.binaries.push((path.clone(), ct.clone(), bytes));
+        pending.types.push((format!("/{path}"), ct));
+        extra.push(Rel::internal(
+            rid.clone(),
+            TY_IMAGE,
+            format!("../media/{file}"),
+        ));
+        let at = Rect {
+            x: CONTENT_LEFT,
+            y: free_top,
+            cx: PIC_WIDTH,
+            cy: PIC_HEIGHT,
+        };
+        shapes.push_str(&pic_shape(next_id, "Picture", &at, &rid, alt.as_deref()));
+        next_id += 1;
+        free_top += PIC_HEIGHT + 200_000;
+    }
+    for blob in charts {
+        let rid = format!("rId{next_rid}");
+        next_rid += 1;
+        let chart_part = blob
+            .parts
+            .first()
+            .map(|p| p.path.clone())
+            .unwrap_or_else(|| "ppt/charts/chart1.xml".to_string());
+        let target = format!(
+            "../{}",
+            chart_part.strip_prefix("ppt/").unwrap_or(&chart_part)
+        );
+        for part in &blob.parts {
+            let ct = part.content_type.clone();
+            pending
+                .binaries
+                .push((part.path.clone(), ct.clone(), part.bytes.clone()));
+            pending.types.push((format!("/{}", part.path), ct));
+        }
+        let chart_xml = remap_chart_rid(&blob.chart_xml, &rid);
+        let at = Rect {
+            x: CONTENT_LEFT,
+            y: free_top,
+            cx: CHART_WIDTH,
+            cy: CHART_HEIGHT,
+        };
+        shapes.push_str(&chart_frame(next_id, "Chart", &at, &blob.uri, &chart_xml));
+        extra.push(Rel::internal(rid.clone(), TY_CHART, target));
+        next_id += 1;
+        free_top += CHART_HEIGHT + 200_000;
     }
 
     if shapes.is_empty() {
@@ -348,7 +479,7 @@ fn slide_xml(
         ));
     }
 
-    format!(
+    let xml = format!(
         concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
             "<p:sld xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"",
@@ -361,6 +492,102 @@ fn slide_xml(
             "</p:sld>"
         ),
         shapes = shapes,
+    );
+    (xml, links)
+}
+
+/// Write a raw binary part (image bytes, an embedded workbook, …).
+fn put_binary<W: Write + Seek>(
+    zip: &mut ZipWriter<W>,
+    opts: SimpleFileOptions,
+    name: &str,
+    _ct: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    zip.start_file(name, opts).map_err(|e| Error::Io {
+        path: name.into(),
+        source: std::io::Error::other(e),
+    })?;
+    zip.write_all(bytes).map_err(|e| Error::Io {
+        path: name.into(),
+        source: e,
+    })
+}
+
+/// Pick a file extension for a media part from its content type.
+fn ext_for_mime(mime: &Option<String>) -> &'static str {
+    match mime.as_deref() {
+        Some("image/png") => "png",
+        Some("image/jpeg") => "jpg",
+        Some("image/gif") => "gif",
+        Some("image/bmp") => "bmp",
+        Some("image/tiff") => "tif",
+        Some("image/svg+xml") => "svg",
+        Some("image/webp") => "webp",
+        Some("image/x-emf") => "emf",
+        Some("image/x-wmf") => "wmf",
+        _ => "png",
+    }
+}
+
+/// Swap the `r:id` inside a `<c:chart>` element for the one this slide actually
+/// assigned, so the regenerated graphic frame points at the right relationship.
+fn remap_chart_rid(xml: &str, new_rid: &str) -> String {
+    if let Some(pos) = xml.find("r:id=\"") {
+        let after = pos + 6; // length of `r:id="`
+        if let Some(end) = xml[after..].find('"') {
+            let mut out = xml.to_string();
+            out.replace_range(after..after + end, new_rid);
+            return out;
+        }
+    }
+    xml.to_string()
+}
+
+/// A picture shape: blip fill bound to a media relationship, no placeholder.
+fn pic_shape(id: u32, name: &str, at: &Rect, r_id: &str, alt: Option<&str>) -> String {
+    format!(
+        concat!(
+            "<p:pic>",
+            "<p:nvPicPr><p:cNvPr id=\"{id}\" name=\"{name}\" descr=\"{descr}\"/>",
+            "<p:cNvPicPr/><p:nvPr/></p:nvPicPr>",
+            "<p:blipFill><a:blip r:embed=\"{rid}\"/>",
+            "<a:stretch><a:fillRect/></a:stretch></p:blipFill>",
+            "<p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/>",
+            "<a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>",
+            "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>",
+            "</p:pic>"
+        ),
+        id = id,
+        name = parts::esc_attr(name),
+        descr = parts::esc_attr(alt.unwrap_or("")),
+        rid = r_id,
+        x = at.x,
+        y = at.y,
+        cx = at.cx,
+        cy = at.cy,
+    )
+}
+
+/// A chart graphic frame carrying the captured `<c:chart>` element verbatim.
+fn chart_frame(id: u32, name: &str, at: &Rect, uri: &str, chart_xml: &str) -> String {
+    format!(
+        concat!(
+            "<p:graphicFrame>",
+            "<p:nvGraphicFramePr><p:cNvPr id=\"{id}\" name=\"{name}\"/>",
+            "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>",
+            "<p:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></p:xfrm>",
+            "<a:graphic><a:graphicData uri=\"{uri}\">{chart}</a:graphicData></a:graphic>",
+            "</p:graphicFrame>"
+        ),
+        id = id,
+        name = parts::esc_attr(name),
+        x = at.x,
+        y = at.y,
+        cx = at.cx,
+        cy = at.cy,
+        uri = parts::esc_attr(uri),
+        chart = chart_xml,
     )
 }
 
@@ -847,11 +1074,21 @@ mod tests {
                     },
                     Block {
                         role: Role::Chart,
-                        content: BlockContent::Chart { caption: None },
+                        content: BlockContent::Chart {
+                            caption: None,
+                            blob: None,
+                            rid: None,
+                            uri: None,
+                        },
                     },
                     Block {
                         role: Role::Picture,
-                        content: BlockContent::Picture { alt: None },
+                        content: BlockContent::Picture {
+                            alt: None,
+                            data: None,
+                            mime: None,
+                            embed: None,
+                        },
                     },
                 ],
             }],
@@ -860,7 +1097,7 @@ mod tests {
         let report = write_pptx(&deck, std::io::Cursor::new(&mut buf)).expect("writes");
         assert_eq!(report.skipped_count(), 2, "{:?}", report.skipped);
         assert!(report.skipped.iter().any(|s| s.contains("chart")));
-        assert!(report.skipped.iter().any(|s| s.contains("pictures")));
+        assert!(report.skipped.iter().any(|s| s.contains("picture")));
     }
 
     #[test]

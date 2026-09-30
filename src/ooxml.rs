@@ -14,14 +14,16 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use quick_xml::Reader as XmlReader;
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use quick_xml::name::QName;
+use quick_xml::Reader as XmlReader;
 use zip::ZipArchive;
 
 use crate::error::{Error, Result};
-use crate::ir::{Block, BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};
+use crate::ir::{
+    Block, BlockContent, ChartBlob, ChartPart, Deck, Paragraph, Role, Run, Slide, TextContent,
+};
 
 type Pkg = ZipArchive<File>;
 
@@ -190,17 +192,290 @@ pub fn read_file(path: &Path) -> Result<Deck> {
         return Err(Error::MissingPart("ppt/slides/slide1.xml".to_string()));
     }
 
+    // The package content types tell us, for every captured chart part, what
+    // content type to register on the way out — charts are preserved verbatim.
+    let (ct_overrides, ct_defaults) = read_part(&mut pkg, "[Content_Types].xml")
+        .map(|x| parse_content_types(&x))
+        .unwrap_or_default();
+
     let mut deck = Deck::default();
     for (index, part) in parts.iter().enumerate() {
         let xml = read_part(&mut pkg, part).ok_or_else(|| Error::MissingPart(part.clone()))?;
         // Hyperlinks are stored as relationship ids, so the slide's own rels
         // part has to be available while its runs are being read.
-        let rels = read_part(&mut pkg, &rels_path_for(part))
+        let hrefs = read_part(&mut pkg, &rels_path_for(part))
             .map(|x| parse_external_relationships(&x))
             .unwrap_or_default();
-        deck.slides.push(parse_slide(&xml, index, part, &rels)?);
+        // The *full* relationship set (internal too) resolves picture media and
+        // chart parts to their files.
+        let full = read_part(&mut pkg, &rels_path_for(part))
+            .map(|x| parse_relationships(&x))
+            .unwrap_or_default();
+
+        let mut slide = parse_slide(&xml, index, part, &hrefs)?;
+        resolve_media(
+            &mut slide,
+            part,
+            &mut pkg,
+            &full,
+            &ct_overrides,
+            &ct_defaults,
+        );
+        deck.slides.push(slide);
     }
     Ok(deck)
+}
+
+/// Turn the media and chart relationships a slide declares into real bytes.
+///
+/// The reader produces `Picture { embed }` and `Chart { rid, uri }` blocks with
+/// no content; this walks the package to fill them in. A block whose
+/// relationship is missing or dangling simply stays empty and is reported as
+/// unplaceable later, rather than panicking here.
+fn resolve_media(
+    slide: &mut Slide,
+    part: &str,
+    pkg: &mut Pkg,
+    rels: &HashMap<String, String>,
+    ct_overrides: &HashMap<String, String>,
+    ct_defaults: &HashMap<String, String>,
+) {
+    let dir = part
+        .rsplit_once('/')
+        .map(|(d, _)| format!("{d}/"))
+        .unwrap_or_default();
+
+    for block in &mut slide.blocks {
+        let replacement = match &block.content {
+            BlockContent::Picture {
+                embed: Some(rid),
+                alt,
+                ..
+            } => {
+                let path = rels.get(rid).map(|t| resolve_part(&dir, t));
+                let bytes = path.as_ref().and_then(|p| read_part_bytes(pkg, p));
+                match (path, bytes) {
+                    (Some(p), Some(b)) => Some(BlockContent::Picture {
+                        alt: alt.clone(),
+                        data: Some(b),
+                        mime: Some(mime_for(&p)),
+                        embed: None,
+                    }),
+                    _ => None,
+                }
+            }
+            BlockContent::Chart {
+                rid: Some(rid),
+                uri: Some(uri),
+                ..
+            } => {
+                let chart_path = rels.get(rid).map(|t| resolve_part(&dir, t));
+                match chart_path {
+                    Some(path) => capture_chart_subgraph(pkg, &path, ct_overrides, ct_defaults)
+                        .map(|parts| {
+                            let chart_xml = format!(
+                                "<c:chart xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" r:id=\"{rid}\"/>"
+                            );
+                            BlockContent::Chart {
+                                caption: None,
+                                blob: Some(ChartBlob {
+                                    uri: uri.clone(),
+                                    chart_xml,
+                                    parts,
+                                }),
+                                // Keep the original r:id so the writer can
+                                // remap it onto a fresh relationship.
+                                rid: Some(rid.clone()),
+                                uri: Some(uri.clone()),
+                            }
+                        }),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(content) = replacement {
+            block.content = content;
+        }
+    }
+}
+
+/// Read a part as raw bytes — media images and chart embeddings are not text.
+fn read_part_bytes(pkg: &mut Pkg, name: &str) -> Option<Vec<u8>> {
+    let mut entry = pkg.by_name(name).ok()?;
+    let mut buf = Vec::new();
+    entry.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// BFS every part a chart's relationship graph reaches and collect them
+/// verbatim, so the writer can re-emit the chart without understanding it.
+///
+/// The walk stops at an embedded workbook (its internals are opaque to a
+/// `.pptx` reader and are copied as one blob) but continues through the chart's
+/// own rels, theme and style parts.
+fn capture_chart_subgraph(
+    pkg: &mut Pkg,
+    start: &str,
+    overrides: &HashMap<String, String>,
+    defaults: &HashMap<String, String>,
+) -> Option<Vec<ChartPart>> {
+    let mut out: Vec<ChartPart> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: Vec<String> = vec![start.to_string()];
+
+    while let Some(part_path) = queue.pop() {
+        if !seen.insert(part_path.clone()) {
+            continue;
+        }
+        let bytes = read_part_bytes(pkg, &part_path)?;
+        let content_type = content_type_for(&part_path, overrides, defaults);
+        out.push(ChartPart {
+            path: part_path.clone(),
+            bytes,
+            content_type,
+        });
+
+        // Only relationship-bearing XML parts continue the walk; a workbook is
+        // a ZIP and must not be recursed into. A part with no `.rels` partner
+        // (a chart that carries no embedded workbook, for instance) simply has
+        // no further parts to pull in — that is normal, not an error, so we
+        // move on to the next queued part rather than abandoning the whole
+        // subgraph.
+        if !part_path.ends_with(".rels") && !part_path.ends_with(".xlsx") {
+            let rels_path = rels_path_for(&part_path);
+            let Some(rels_xml) = read_part_bytes(pkg, &rels_path) else {
+                continue;
+            };
+            // The relationship part is itself a part that must be re-emitted:
+            // without it the rebuilt chart would reference an `r:id` (e.g. the
+            // embedded workbook) through a `.rels` file that no longer exists,
+            // which is exactly the dangling reference a consumer rejects.
+            if seen.insert(rels_path.clone()) {
+                out.push(ChartPart {
+                    path: rels_path,
+                    bytes: rels_xml.clone(),
+                    content_type: "application/vnd.openxmlformats-package.relationships+xml"
+                        .to_string(),
+                });
+            }
+            let rels_text = String::from_utf8_lossy(&rels_xml);
+            let base_dir = part_path
+                .rsplit_once('/')
+                .map(|(d, _)| format!("{d}/"))
+                .unwrap_or_default();
+            for (_, target) in relationships_of(&rels_text) {
+                queue.push(resolve_part(&base_dir, &target));
+            }
+        }
+    }
+
+    Some(out)
+}
+
+/// All (id, target) pairs in a relationships part, internal and external.
+fn relationships_of(xml: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let mut id = None;
+                let mut target = None;
+                for a in e.attributes().flatten() {
+                    if let Some((k, v)) = attr_of(&a) {
+                        match k.as_str() {
+                            "Id" => id = Some(v),
+                            "Target" => target = Some(v),
+                            _ => {}
+                        }
+                    }
+                }
+                if let (Some(i), Some(t)) = (id, target) {
+                    out.push((i, t));
+                }
+            }
+            Ok(_) => {}
+        }
+    }
+    out
+}
+
+/// Parse `[Content_Types].xml` into Override part-name -> content type and
+/// Default extension -> content type.
+fn parse_content_types(xml: &str) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut overrides = HashMap::new();
+    let mut defaults = HashMap::new();
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    loop {
+        match reader.read_event() {
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let local = local_name(e.name());
+                if local == "Override" {
+                    let part = attr(&e, "PartName");
+                    let ct = attr(&e, "ContentType");
+                    if let (Some(p), Some(c)) = (part, ct) {
+                        overrides.insert(p.trim_start_matches('/').to_string(), c);
+                    }
+                } else if local == "Default" {
+                    let ext = attr(&e, "Extension");
+                    let ct = attr(&e, "ContentType");
+                    if let (Some(e), Some(c)) = (ext, ct) {
+                        defaults.insert(e.to_lowercase(), c);
+                    }
+                }
+            }
+            Ok(_) => {}
+        }
+    }
+    (overrides, defaults)
+}
+
+/// Resolve a content type for a captured part.
+fn content_type_for(
+    path: &str,
+    overrides: &HashMap<String, String>,
+    defaults: &HashMap<String, String>,
+) -> String {
+    if path.ends_with(".rels") {
+        return "application/vnd.openxmlformats-package.relationships+xml".to_string();
+    }
+    if let Some(ct) = overrides.get(path.trim_start_matches('/')) {
+        return ct.clone();
+    }
+    let ext = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_lowercase())
+        .unwrap_or_default();
+    defaults
+        .get(&ext)
+        .cloned()
+        .unwrap_or_else(|| "application/octet-stream".to_string())
+}
+
+/// Derive a media part's content type from its file extension.
+fn mime_for(path: &str) -> String {
+    let ext = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "emf" => "image/x-emf",
+        "wmf" => "image/x-wmf",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 fn read_part(pkg: &mut Pkg, name: &str) -> Option<String> {
@@ -387,6 +662,12 @@ struct ShapeBuilder<'a> {
 
     chart: bool,
     diagram: bool,
+    /// `p:blip/@r:embed` for a picture — the relationship id whose target is
+    /// the media file. Resolved to bytes by `read_file`.
+    pic_embed: Option<String>,
+    /// `c:chart/@r:id` and its containing graphicData's `uri`.
+    chart_rid: Option<String>,
+    chart_uri: Option<String>,
 }
 
 impl<'a> ShapeBuilder<'a> {
@@ -412,6 +693,9 @@ impl<'a> ShapeBuilder<'a> {
             cell: None,
             chart: false,
             diagram: false,
+            pic_embed: None,
+            chart_rid: None,
+            chart_uri: None,
         }
     }
 
@@ -430,10 +714,31 @@ impl<'a> ShapeBuilder<'a> {
                 if let Some(uri) = attr(e, "uri") {
                     if uri.contains("drawingml/2006/diagram") {
                         self.diagram = true;
+                    } else if uri.contains("drawingml/2006/chart") {
+                        // A chart graphic frame: remember the URI so the writer
+                        // can rebuild the frame, and flag it as a chart.
+                        self.chart = true;
+                        self.chart_uri = Some(uri);
                     }
                 }
             }
-            "chart" => self.chart = true,
+            "blip" => {
+                // Only pictures carry a blip; the referenced media lives in
+                // `ppt/media/` and is fetched by `read_file`.
+                if let Some(embed) = attr(e, "embed") {
+                    self.pic_embed = Some(embed);
+                }
+            }
+            "chart" => {
+                self.chart = true;
+                // The relationship reference is `r:id`; `attr` matches on the
+                // local name, so the namespace prefix is already stripped and
+                // we ask for `id`. (Matching `r:id` literally never hits, which
+                // is exactly how a chart silently lost its r:id before.)
+                if let Some(rid) = attr(e, "id").or_else(|| attr(e, "Id")) {
+                    self.chart_rid = Some(rid);
+                }
+            }
             "tbl" => self.table = true,
             "tr" if self.table => self.row = Some(Vec::new()),
             "tc" if self.table => self.cell = Some(String::new()),
@@ -577,11 +882,21 @@ impl<'a> ShapeBuilder<'a> {
         let content = if self.table {
             BlockContent::Table { rows: self.rows }
         } else if self.chart {
-            BlockContent::Chart { caption: None }
+            BlockContent::Chart {
+                caption: None,
+                blob: None,
+                rid: self.chart_rid,
+                uri: self.chart_uri,
+            }
         } else if self.diagram {
             BlockContent::Diagram { caption: None }
         } else if self.kind == ShapeKind::Picture {
-            BlockContent::Picture { alt: self.alt }
+            BlockContent::Picture {
+                alt: self.alt,
+                data: None,
+                mime: None,
+                embed: self.pic_embed,
+            }
         } else if !self.paragraphs.is_empty() {
             BlockContent::Text(TextContent {
                 paragraphs: self.paragraphs,
@@ -872,7 +1187,9 @@ mod tests {
         let s = slide(PICTURE);
         assert_eq!(s.blocks[0].role, Role::Picture);
         match &s.blocks[0].content {
-            BlockContent::Picture { alt } => assert_eq!(alt.as_deref(), Some("revenue trend")),
+            BlockContent::Picture { alt, .. } => {
+                assert_eq!(alt.as_deref(), Some("revenue trend"))
+            }
             other => panic!("expected a picture, got {other:?}"),
         }
     }

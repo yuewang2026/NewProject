@@ -71,7 +71,7 @@ A `Deck` is slides; a slide is `Block`s; every block carries a `Role`:
     { "role": "title",  "content": { "text":  { "paragraphs": [ … ] } } },
     { "role": "body",   "content": { "text":  { "paragraphs": [ … ] } } },
     { "role": "table",  "content": { "table": { "rows": [ … ] } } },
-    { "role": "chart",  "content": { "chart": { "caption": null } } }
+    { "role": "chart",  "content": { "chart": { "caption": null, "blob": { "parts": [ … ] } } } }
   ]
 }
 ```
@@ -101,13 +101,15 @@ Three things fall out of having a real IR instead of string munging:
 | `deckr diff` | 0.4 | semantic diff between two decks |
 
 Already handled: titles and free-form text boxes, nested bullet levels, soft
-line breaks, tables, pictures (with alt text), charts and SmartArt (detected,
-numbers still to come), empty placeholders, page furniture, per-run formatting
-(bold, italic, underline, strike, size, colour, hyperlinks), **and slide order
-as the author intended it** rather than as filenames sort it.
+line breaks, tables, pictures (with alt text *and* their media bytes), charts
+(captured verbatim, embedded workbook included), empty placeholders, page
+furniture, per-run formatting (bold, italic, underline, strike, size, colour,
+hyperlinks), **and slide order as the author intended it** rather than as
+filenames sort it.
 
-Still missing, deliberately: chart XML round-tripping, media extraction for
-pictures, and reusing your own `.potx` instead of the built-in theme.
+Still missing, deliberately: decoding chart *numbers* into editable data,
+SmartArt (diagram) round-tripping, and reusing your own `.potx` instead of the
+built-in theme.
 
 ## The loss report
 
@@ -123,17 +125,19 @@ tests/fixtures/sample.pptx
   placed loose: 1 block(s) kept without master styling
     slide 1: 'freeform' has no placeholder on layout 'Title Slide' — placed loose,
              so it no longer follows the template
-  unplaceable blocks: 2 (not counted as loss — needs 0.4)
-    slide 1: chart-blocks need chart XML (0.4)
-    slide 1: pictures need media extraction (0.4)
+  unplaceable blocks: none
 ```
+
+(The sample ships a real picture and a real chart; both round-trip, so nothing
+is tallied. A diagram, or a chart deckr cannot decode, would be listed here
+rather than faked as a blank frame.)
 
 Three separate verdicts, because "did everything survive" and "did everything
 stay bound to the master" are different questions:
 
 - **paragraphs 8 / 8** — every paragraph reachable through a text role came back. This is the number that matters.
 - **placed loose: 1** — a free-form text box had no placeholder of its type on the chosen layout. The words are still in the file; they just no longer inherit the master's styling. Reported, not hidden.
-- **unplaceable: 2** — a chart and a picture. Emitting an empty frame for either would render as a blank rectangle, which is worse than saying so outright. Both are 0.4 work.
+- **unplaceable: none** — on this fixture the chart and picture both round-trip, so nothing is tallied here. On a deck with a diagram or a chart deckr cannot decode, the offending blocks would be listed instead of being faked as a blank frame.
 
 Getting from 6/8 paragraphs to 8/8 on this fixture took two fixes that unit
 tests could not have found: a space was being eaten between adjacent text runs,
@@ -357,7 +361,7 @@ deckr 的立场相反：**不允许你指定几何位置，只允许你声明语
     { "role": "title",  "content": { "text":  { "paragraphs": [ … ] } } },
     { "role": "body",   "content": { "text":  { "paragraphs": [ … ] } } },
     { "role": "table",  "content": { "table": { "rows": [ … ] } } },
-    { "role": "chart",  "content": { "chart": { "caption": null } } }
+    { "role": "chart",  "content": { "chart": { "caption": null, "blob": { "parts": [ … ] } } } }
   ]
 }
 ```
@@ -386,11 +390,12 @@ deckr 的立场相反：**不允许你指定几何位置，只允许你声明语
 | `deckr diff` | 0.4 | 两份 deck 的语义 diff |
 
 已支持：标题与自由文本框、多层缩进的项目符号、软换行、表格、图片（含 alt
-文本）、图表与 SmartArt（能识别，数字提取待做）、空占位符、页眉页码等页面装饰、
+文本与媒体字节）、图表（原样捕获，含内嵌工作簿）、空占位符、页眉页码等页面装饰、
 run 级排版（粗斜体、下划线、删除线、字号、颜色、超链接），**以及作者真正想要的
 页序**，而不是文件名排序的页序。
 
-有意暂缺：图表 XML 的往返、图片的媒体提取、复用你自己的 `.potx` 而非内置主题。
+有意暂缺：把图表*数字*解码成可编辑数据、SmartArt（图示）的往返、复用你自己的
+`.potx` 而非内置主题。
 
 ## 损耗报告
 
@@ -405,16 +410,18 @@ tests/fixtures/sample.pptx
   placed loose: 1 block(s) kept without master styling
     slide 1: 'freeform' has no placeholder on layout 'Title Slide' — placed loose,
              so it no longer follows the template
-  unplaceable blocks: 2 (not counted as loss — needs 0.4)
-    slide 1: chart-blocks need chart XML (0.4)
-    slide 1: pictures need media extraction (0.4)
+  unplaceable blocks: none
 ```
+
+(The sample ships a real picture and a real chart; both round-trip, so nothing
+is tallied. A diagram, or a chart deckr cannot decode, would be listed here
+rather than faked as a blank frame.)
 
 三个分开的结论，因为「内容都在吗」和「都还绑着母版吗」是两个不同的问题：
 
 - **paragraphs 8 / 8** —— 所有文本角色的段落都回来了。这是最关键的那个数字。
 - **placed loose: 1** —— 一个自由文本框在选中的版式上找不到同类占位符。文字还在文件里，只是不再继承母版样式。明说了，没藏着。
-- **unplaceable: 2** —— 一个图表和一个图片。给它们输出一个空框，渲染出来就是一块白矩形，比直说更糟。两项都排在 0.4。
+- **unplaceable: none** —— 在这个样例里，图表和图片都能往返，所以这里不计入任何块。若某页有图示（SmartArt）或 deckr 无法解码的图表，相关块会列在这里，而不是被伪造成一个空白框。
 
 在这个 fixture 上把段落数从 6/8 提到 8/8，靠的是两个单元测试根本发现不了的
 bugfix：相邻 run 之间的空格被吞掉了；以及「标题 + 副标题 + 图表」的页面被判成了

@@ -21,6 +21,7 @@ CONTENT_TYPES = XML + f'''<Types xmlns="http://schemas.openxmlformats.org/packag
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
 <Default Extension="png" ContentType="image/png"/>
+<Default Extension="xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>
 <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
 <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
 <Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
@@ -116,10 +117,18 @@ SLIDE2_RELS = XML + '''<Relationships xmlns="http://schemas.openxmlformats.org/p
 <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>
 </Relationships>'''
 
-CHART1 = XML + f'''<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" {NS_A}>
+CHART1 = XML + f'''<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" {NS_A} {NS_R}>
 <c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>growth</a:t></a:r></a:p></c:rich></c:tx></c:title>
 <c:plotArea><c:barChart><c:barDir val="col"/></c:barChart></c:plotArea>
+<c:externalData r:id="rId1"><c:autoUpdate val="0"/></c:externalData>
 </c:chart></c:chartSpace>'''
+
+# The chart points at an embedded workbook, so its relationship graph reaches
+# a second part — exactly the walk `capture_chart_subgraph` is built to make
+# verbatim. Without this the BFS would only ever see the chart XML.
+CHART1_RELS = XML + '''<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="../embeddings/workbook1.xlsx"/>
+</Relationships>'''
 
 
 def png_1x1() -> bytes:
@@ -138,6 +147,59 @@ def png_1x1() -> bytes:
     )
 
 
+def make_minimal_xlsx() -> bytes:
+    """A genuinely openable single-sheet workbook.
+
+    Charts keep their numbers in an embedded `.xlsx`; deckr copies it verbatim,
+    so the fixture ships a real one rather than a placeholder. It is tiny but
+    structurally complete enough that Excel would open it.
+    """
+    import io
+
+    ct = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        "</Types>"
+    )
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        "</Relationships>"
+    )
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>'
+        "</workbook>"
+    )
+    book_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        "</Relationships>"
+    )
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        "<sheetData/></worksheet>"
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ct)
+        z.writestr("_rels/.rels", root_rels)
+        z.writestr("xl/workbook.xml", workbook)
+        z.writestr("xl/_rels/workbook.xml.rels", book_rels)
+        z.writestr("xl/worksheets/sheet1.xml", sheet)
+    return buf.getvalue()
+
+
 PARTS = [
     ("[Content_Types].xml", CONTENT_TYPES),
     ("_rels/.rels", ROOT_RELS),
@@ -147,6 +209,8 @@ PARTS = [
     ("ppt/slides/slide2.xml", SLIDE2),
     ("ppt/slides/_rels/slide2.xml.rels", SLIDE2_RELS),
     ("ppt/charts/chart1.xml", CHART1),
+    ("ppt/charts/_rels/chart1.xml.rels", CHART1_RELS),
+    ("ppt/embeddings/workbook1.xlsx", make_minimal_xlsx()),
 ]
 
 out = sys.argv[1] if len(sys.argv) > 1 else "sample.pptx"

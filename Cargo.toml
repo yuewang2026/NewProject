@@ -31,6 +31,9 @@ thiserror = "2.0.21"
 # Office packages use ZIP Deflate or Stored; we deliberately do not pull in
 # aes/bzip2/lzma/zstd support, which would drag ~25 transitive crates along.
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# Pictures carry their bytes; JSON keeps them portable without inventing a
+# sidecar-file convention by base64-encoding in place.
+base64 = "0.22"
 
 # Keep the dependency graph honest and the test suite fast.
 
