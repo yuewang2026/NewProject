@@ -152,12 +152,41 @@ headings inside it mark the phases, not releases.
   `BlockContent`, `TextContent`, `Paragraph`, `ChartBlob` and `ChartPart` now
   derive `PartialEq`, which the diff needs and callers may want.
 
+### Added — chart numbers (0.4)
+
+- **Chart numbers are decoded.** `ChartBlob` → `ChartData`: a new `chart`
+  module walks the captured chart part's `c:chartSpace` XML and pulls out what
+  a human calls "the data" — `ChartKind` (bar/line/pie/area/scatter/radar) and
+  one `ChartSeries` per series, each with its name, category labels and values.
+  An empty `<c:v/>` decodes to `None` — a gap, never a zero. New public API:
+  `ChartData`, `ChartSeries`, `ChartKind`, `decode`, `decode_blob`, and the
+  `Block::as_chart_data` accessor.
+- `BlockContent::Chart` gained `data: Option<ChartData>` (serialised through
+  the JSON IR, gaps as `null`). The blob remains the write-side source of
+  truth; `data` is a best-effort reading. A chart's own title now also fills
+  the block's `caption` when the slide did not name it.
+- **Markdown export carries the numbers.** A chart with decoded data exports
+  as its `[chart]` marker plus a GitHub-flavoured table — one row per
+  category, one column per series, gaps as empty cells.
+- **The diff speaks in numbers.** When both sides decode, chart changes are
+  reported per point: `ChartValueChanged` (series × category, `3.5` → `4.1`),
+  series added/removed/renamed, category label changes — replacing the old
+  byte-level "chart content changed". The byte comparison remains the
+  fallback for charts neither side can decode.
+- **The render draws the chart.** A chart with decoded numbers renders as a
+  real plot — grouped bars, polylines, or a pie from the first numeric
+  series — with axis gridlines, category labels and a legend, all
+  deterministic. Charts without decodable data keep the honest placeholder.
+- The fixture chart now ships two real series (Revenue/Cost over Q1–Q3, with
+  a deliberate gap in Cost's Q2), so every consumer above is tested against
+  actual numbers in CI.
+
 ### Known limitations
 
-- Charts are preserved **verbatim**, not decoded — their numbers are not
-  extracted into the IR (that is the later numeric-extraction phase). The chart
-  is written back exactly as read, so nothing is lost, but deckr cannot yet edit
-  a chart's data.
+- Charts are read (their numbers now decode into the IR) but still written
+  back **verbatim** — deckr cannot yet re-author a chart from edited numbers.
+  Nothing is lost on the way through, but editing a chart's data is not
+  possible yet.
 - Diagrams (SmartArt) are detected and reported as skipped; they are not yet
   written back.
 - PDF rasterisation (PNG is shipped; PDF is not) is not done yet.

@@ -276,13 +276,21 @@ fn resolve_media(
                             let chart_xml = format!(
                                 "<c:chart xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" r:id=\"{rid}\"/>"
                             );
+                            let blob = ChartBlob {
+                                uri: uri.clone(),
+                                chart_xml,
+                                parts,
+                            };
+                            // Numbers are a bonus view over the verbatim blob:
+                            // decode what the chart part yields, and let the
+                            // chart's own title serve as the caption when the
+                            // slide did not provide one.
+                            let data = crate::chart::decode_blob(&blob);
+                            let caption = data.as_ref().and_then(|d| d.title.clone());
                             BlockContent::Chart {
-                                caption: None,
-                                blob: Some(ChartBlob {
-                                    uri: uri.clone(),
-                                    chart_xml,
-                                    parts,
-                                }),
+                                caption,
+                                blob: Some(blob),
+                                data,
                                 // Keep the original r:id so the writer can
                                 // remap it onto a fresh relationship.
                                 rid: Some(rid.clone()),
@@ -885,6 +893,7 @@ impl<'a> ShapeBuilder<'a> {
             BlockContent::Chart {
                 caption: None,
                 blob: None,
+                data: None,
                 rid: self.chart_rid,
                 uri: self.chart_uri,
             }

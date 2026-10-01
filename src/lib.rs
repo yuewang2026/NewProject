@@ -20,6 +20,7 @@
 //! ```
 
 pub mod build;
+pub mod chart;
 pub mod diff;
 pub mod error;
 pub mod ir;
@@ -33,6 +34,7 @@ pub mod template;
 pub use build::{
     BuildReport, write_pptx, write_pptx_file, write_pptx_file_template, write_pptx_template,
 };
+pub use chart::{ChartData, ChartKind, ChartSeries, decode, decode_blob};
 pub use diff::{Change, DeckDiff, diff_decks, diff_files};
 pub use error::{Error, Result};
 pub use ir::{Block, BlockContent, Deck, Paragraph, Role, Run, Slide, TextContent};

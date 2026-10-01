@@ -188,6 +188,16 @@ impl Block {
         }
     }
 
+    /// The decoded numbers of a chart block, when the chart yielded any.
+    pub fn as_chart_data(&self) -> Option<&crate::chart::ChartData> {
+        match &self.content {
+            BlockContent::Chart {
+                data: Some(data), ..
+            } => Some(data),
+            _ => None,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match &self.content {
             BlockContent::Text(t) => t.is_empty(),
@@ -234,10 +244,17 @@ pub enum BlockContent {
     /// scratch and are not carried in JSON, because `blob` already owns `uri`
     /// and the writer re-derives the id from `blob.chart_xml`. The writer
     /// ignores a chart whose `blob` is `None`.
+    ///
+    /// `data` is the decoded numbers (`series × categories → values`), filled
+    /// by the reader when the chart part yields anything readable. It is
+    /// derived information — the blob remains the write-side source of truth —
+    /// so callers may treat it as a best-effort view.
     Chart {
         caption: Option<String>,
         #[serde(default)]
         blob: Option<ChartBlob>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<crate::chart::ChartData>,
         #[serde(skip)]
         rid: Option<String>,
         #[serde(skip)]

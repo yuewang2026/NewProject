@@ -114,6 +114,9 @@ pub fn render_slide(slide: &Slide) -> String {
             BlockContent::Picture { alt, .. } => {
                 y = render_media_box(&mut body, y, "image", alt.as_deref());
             }
+            BlockContent::Chart { data: Some(d), .. } if d.has_numbers() => {
+                y = render_chart(&mut body, y, d);
+            }
             BlockContent::Chart { .. } => {
                 y = render_media_box(&mut body, y, "chart", None);
             }
@@ -156,6 +159,277 @@ fn render_table(body: &mut String, rows: &[Vec<String>], mut y: i32) -> i32 {
     }
     y += 14;
     y
+}
+
+/// The series colours, in assignment order. Office's own palette, simplified:
+/// the preview is a reading aid, not a style source — the master owns styling.
+const CHART_COLORS: [&str; 6] = [
+    "#4472C4", "#C00000", "#70AD47", "#FFC000", "#7C64A8", "#2E9599",
+];
+
+/// Draw a decoded chart as a real plot — grouped bars, lines, or a pie from
+/// the first numeric series. Layout is fixed and deterministic: same data in,
+/// same SVG out.
+///
+/// The plot replaces the dashed media placeholder only when the data actually
+/// carries numbers; otherwise the caller falls back to the placeholder box.
+fn render_chart(body: &mut String, y: i32, d: &crate::chart::ChartData) -> i32 {
+    let chart_w = (W - 2 * MARGIN) as i32;
+    let chart_h = 240i32;
+    let x0 = MARGIN as i32;
+    let top = y + 8;
+    let bottom = top + chart_h;
+
+    // The plot's own geometry: a left gutter for y-axis labels, a bottom
+    // gutter for category labels.
+    let gutter_l = x0 + 56;
+    let plot_w = chart_w - (gutter_l - x0) - 8;
+    let plot_top = top + if d.title.is_some() { 26 } else { 6 };
+    let plot_h = bottom - 26 - plot_top;
+
+    let max = d
+        .series
+        .iter()
+        .flat_map(|s| s.values.iter())
+        .flatten()
+        .copied()
+        .fold(0.0f64, f64::max);
+    let cat_count = d
+        .series
+        .iter()
+        .map(|s| s.categories.len().max(s.values.len()))
+        .max()
+        .unwrap_or(0);
+
+    if max <= 0.0 || cat_count == 0 {
+        // Nothing plottable — keep the honest placeholder instead.
+        return render_media_box(body, y, "chart", d.title.as_deref());
+    }
+
+    let scale = |v: f64| plot_h as f64 * (v / max);
+
+    // Frame: y-axis with three gridlines and labels (0, mid, max).
+    for (i, frac) in [0.0f64, 0.5, 1.0].iter().enumerate() {
+        let gy = bottom - 26 - (plot_h as f64 * frac) as i32;
+        body.push_str(&format!(
+            "  <line x1=\"{gutter_l}\" y1=\"{gy}\" x2=\"{}\" y2=\"{gy}\" stroke=\"{GRID}\" stroke-width=\"{}\"/>\n",
+            gutter_l + plot_w,
+            if i == 0 { 2 } else { 1 }
+        ));
+        let label = if *frac == 1.0 {
+            crate::chart::format_number(max)
+        } else if *frac == 0.5 {
+            crate::chart::format_number(max * 0.5)
+        } else {
+            "0".to_string()
+        };
+        body.push_str(&format!(
+            "  <text x=\"{}\" y=\"{}\" font-family=\"Segoe UI, Arial, sans-serif\" font-size=\"12\" fill=\"{INK}\" text-anchor=\"end\">{}</text>\n",
+            gutter_l - 6,
+            gy + 4,
+            label
+        ));
+    }
+
+    // Title, top-left above the plot.
+    if let Some(title) = &d.title {
+        body.push_str(&format!(
+            "  <text x=\"{gutter_l}\" y=\"{}\" font-family=\"Segoe UI, Arial, sans-serif\" font-size=\"15\" font-weight=\"700\" fill=\"{TITLE_INK}\">{}</text>\n",
+            plot_top - 8,
+            escape(&truncate(title, 60))
+        ));
+    }
+
+    let category_of = |i: usize| -> String {
+        d.series
+            .iter()
+            .filter_map(|s| s.categories.get(i))
+            .find(|c| !c.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("{}", i + 1))
+    };
+
+    match d.kind {
+        crate::chart::ChartKind::Pie => {
+            render_pie(body, d, gutter_l + plot_w / 2, plot_top + plot_h / 2);
+        }
+        crate::chart::ChartKind::Line => {
+            render_lines(body, d, gutter_l, plot_w, bottom, &scale);
+        }
+        _ => {
+            render_bars(body, d, gutter_l, plot_w, bottom, &scale);
+        }
+    }
+
+    // Category labels under the axis.
+    let slot = plot_w as f64 / cat_count as f64;
+    for i in 0..cat_count {
+        let cx = gutter_l as f64 + slot * (i as f64 + 0.5);
+        body.push_str(&format!(
+            "  <text x=\"{}\" y=\"{}\" font-family=\"Segoe UI, Arial, sans-serif\" font-size=\"12\" fill=\"{INK}\" text-anchor=\"middle\">{}</text>\n",
+            cx as i32,
+            bottom - 8,
+            escape(&truncate(&category_of(i), 10))
+        ));
+    }
+
+    // Legend under the categories (pie legend lists categories instead).
+    if d.kind != crate::chart::ChartKind::Pie {
+        let mut lx = gutter_l;
+        let ly = bottom + 14;
+        for i in 0..d.series.len() {
+            body.push_str(&format!(
+                "  <rect x=\"{lx}\" y=\"{}\" width=\"10\" height=\"10\" fill=\"{}\"/>\n",
+                ly - 9,
+                CHART_COLORS[i % CHART_COLORS.len()]
+            ));
+            let label = d.series_label(i);
+            body.push_str(&format!(
+                "  <text x=\"{}\" y=\"{ly}\" font-family=\"Segoe UI, Arial, sans-serif\" font-size=\"12\" fill=\"{INK}\">{}</text>\n",
+                lx + 14,
+                escape(&truncate(&label, 16))
+            ));
+            lx += 24 + (label.chars().count() as i32 * 7).min(120);
+            if lx > gutter_l + plot_w - 60 {
+                break;
+            }
+        }
+    } else {
+        for (i, cat) in (0..cat_count).enumerate() {
+            let lx = gutter_l + (i as i32 % 6) * 120;
+            let ly = bottom + 14 + (i as i32 / 6) * 16;
+            body.push_str(&format!(
+                "  <rect x=\"{lx}\" y=\"{}\" width=\"10\" height=\"10\" fill=\"{}\"/>\n",
+                ly - 9,
+                CHART_COLORS[i % CHART_COLORS.len()]
+            ));
+            body.push_str(&format!(
+                "  <text x=\"{}\" y=\"{ly}\" font-family=\"Segoe UI, Arial, sans-serif\" font-size=\"12\" fill=\"{INK}\">{}</text>\n",
+                lx + 14,
+                escape(&truncate(&category_of(cat), 14))
+            ));
+        }
+    }
+
+    y + chart_h + 44
+}
+
+/// Grouped vertical bars: one bar per (category, series) pair.
+fn render_bars(
+    body: &mut String,
+    d: &crate::chart::ChartData,
+    gutter_l: i32,
+    plot_w: i32,
+    bottom: i32,
+    scale: &dyn Fn(f64) -> f64,
+) {
+    let cats = d
+        .series
+        .iter()
+        .map(|s| s.categories.len().max(s.values.len()))
+        .max()
+        .unwrap_or(0);
+    let slot = plot_w as f64 / cats as f64;
+    let group = slot * 0.7;
+    let bar_w = (group / d.series.len() as f64).floor().max(2.0);
+    let axis = bottom - 26;
+    for (si, s) in d.series.iter().enumerate() {
+        for (ci, v) in s.values.iter().enumerate() {
+            let Some(v) = v else { continue };
+            let h = scale(*v).round().max(1.0) as i32;
+            let x = (gutter_l as f64 + slot * ci as f64 + (slot - group) / 2.0 + si as f64 * bar_w)
+                as i32;
+            let y = axis - h;
+            body.push_str(&format!(
+                "  <rect x=\"{x}\" y=\"{y}\" width=\"{}\" height=\"{h}\" fill=\"{}\"/>\n",
+                bar_w as i32 - 1,
+                CHART_COLORS[si % CHART_COLORS.len()]
+            ));
+        }
+    }
+}
+
+/// One polyline per series, point at each category slot.
+fn render_lines(
+    body: &mut String,
+    d: &crate::chart::ChartData,
+    gutter_l: i32,
+    plot_w: i32,
+    bottom: i32,
+    scale: &dyn Fn(f64) -> f64,
+) {
+    let axis = bottom - 26;
+    for (si, s) in d.series.iter().enumerate() {
+        let color = CHART_COLORS[si % CHART_COLORS.len()];
+        let n = s.values.len();
+        if n == 0 {
+            continue;
+        }
+        let slot = if n > 1 {
+            plot_w as f64 / (n - 1) as f64
+        } else {
+            0.0
+        };
+        let pts: Vec<String> = s
+            .values
+            .iter()
+            .enumerate()
+            .filter_map(|(ci, v)| {
+                v.map(|v| {
+                    let x = gutter_l as f64 + slot * ci as f64;
+                    let y = axis - scale(v).round() as i32;
+                    format!("{:.0},{:.0}", x, y)
+                })
+            })
+            .collect();
+        if pts.len() > 1 {
+            body.push_str(&format!(
+                "  <polyline points=\"{}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2.5\"/>\n",
+                pts.join(" ")
+            ));
+        }
+        for p in &pts {
+            let (x, y) = p.split_once(',').unwrap_or(("0", "0"));
+            body.push_str(&format!(
+                "  <circle cx=\"{x}\" cy=\"{y}\" r=\"3\" fill=\"{color}\"/>\n"
+            ));
+        }
+    }
+}
+
+/// A pie of the first series that carries numbers; slices start at 12 o'clock
+/// and run clockwise, in series order of the categories.
+fn render_pie(body: &mut String, d: &crate::chart::ChartData, cx: i32, cy: i32) {
+    let Some(series) = d
+        .series
+        .iter()
+        .find(|s| s.values.iter().any(|v| v.is_some()))
+    else {
+        return;
+    };
+    let total: f64 = series.values.iter().flatten().copied().sum();
+    if total <= 0.0 {
+        return;
+    }
+    let r = 90.0f64;
+    let mut angle = -std::f64::consts::FRAC_PI_2;
+    for (ci, v) in series.values.iter().enumerate() {
+        let Some(v) = v else { continue };
+        if *v <= 0.0 {
+            continue;
+        }
+        let sweep = v / total * std::f64::consts::TAU;
+        let x1 = cx as f64 + r * angle.cos();
+        let y1 = cy as f64 + r * angle.sin();
+        angle += sweep;
+        let x2 = cx as f64 + r * angle.cos();
+        let y2 = cy as f64 + r * angle.sin();
+        let large = if sweep > std::f64::consts::PI { 1 } else { 0 };
+        body.push_str(&format!(
+            "  <path d=\"M {cx},{cy} L {x1:.1},{y1:.1} A {r},{r} 0 {large} 1 {x2:.1},{y2:.1} Z\" fill=\"{}\" stroke=\"#FFFFFF\" stroke-width=\"1.5\"/>\n",
+            CHART_COLORS[ci % CHART_COLORS.len()]
+        ));
+    }
 }
 
 /// Draw a dashed placeholder box for a media block (picture, chart, diagram)
@@ -357,6 +631,7 @@ mod tests {
                     content: BlockContent::Chart {
                         caption: None,
                         blob: None,
+                        data: None,
                         rid: None,
                         uri: None,
                     },

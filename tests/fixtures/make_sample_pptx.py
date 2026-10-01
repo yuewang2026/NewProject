@@ -119,7 +119,20 @@ SLIDE2_RELS = XML + '''<Relationships xmlns="http://schemas.openxmlformats.org/p
 
 CHART1 = XML + f'''<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" {NS_A} {NS_R}>
 <c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>growth</a:t></a:r></a:p></c:rich></c:tx></c:title>
-<c:plotArea><c:barChart><c:barDir val="col"/></c:barChart></c:plotArea>
+<c:plotArea><c:barChart><c:barDir val="col"/>
+<c:ser>
+<c:idx val="0"/><c:order val="0"/>
+<c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Revenue</c:v></c:pt></c:strCache></c:strRef></c:tx>
+<c:cat><c:strRef><c:f>Sheet1!$A$2:$A$4</c:f><c:strCache><c:ptCount val="3"/><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt><c:pt idx="2"><c:v>Q3</c:v></c:pt></c:strCache></c:strRef></c:cat>
+<c:val><c:numRef><c:f>Sheet1!$B$2:$B$4</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="3"/><c:pt idx="0"><c:v>1.5</c:v></c:pt><c:pt idx="1"><c:v>2.5</c:v></c:pt><c:pt idx="2"><c:v>3.5</c:v></c:pt></c:numCache></c:numRef></c:val>
+</c:ser>
+<c:ser>
+<c:idx val="1"/><c:order val="1"/>
+<c:tx><c:strRef><c:f>Sheet1!$C$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Cost</c:v></c:pt></c:strCache></c:strRef></c:tx>
+<c:cat><c:strRef><c:f>Sheet1!$A$2:$A$4</c:f><c:strCache><c:ptCount val="3"/><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt><c:pt idx="2"><c:v>Q3</c:v></c:pt></c:strCache></c:strRef></c:cat>
+<c:val><c:numRef><c:f>Sheet1!$C$2:$C$4</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="3"/><c:pt idx="0"><c:v>1.1</c:v></c:pt><c:pt idx="1"><c:v></c:v></c:pt><c:pt idx="2"><c:v>3.9</c:v></c:pt></c:numCache></c:numRef></c:val>
+</c:ser>
+</c:barChart></c:plotArea>
 <c:externalData r:id="rId1"><c:autoUpdate val="0"/></c:externalData>
 </c:chart></c:chartSpace>'''
 

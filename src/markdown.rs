@@ -6,6 +6,7 @@
 //! placeholder, which is why the Markdown round-trips rather than merely
 //! documents.
 
+use crate::chart::format_number;
 use crate::ir::{Block, BlockContent, Deck, Paragraph, Role, Slide, TextContent};
 
 /// Render a whole deck as Markdown. Slides are separated by `---`.
@@ -46,6 +47,13 @@ fn render_slide(out: &mut String, slide: &Slide) {
             }
             // Charts and diagrams cannot yet be re-authored from Markdown, so
             // they export as a marker that survives the round trip as itself.
+            // When the chart's numbers were decoded (0.4), they ride along as
+            // a table — the marker stays so a rebuild still knows a chart was
+            // here, and the table carries what it said.
+            BlockContent::Chart { data: Some(d), .. } if d.has_numbers() => {
+                out.push_str("`[chart]`\n\n");
+                out.push_str(&render_chart_data(d));
+            }
             BlockContent::Chart { .. } => out.push_str("`[chart]`\n\n"),
             BlockContent::Diagram { .. } => out.push_str("`[diagram]`\n\n"),
             BlockContent::Empty => {}
@@ -129,6 +137,45 @@ fn render_inline(p: &Paragraph) -> String {
             text
         })
         .collect()
+}
+
+/// The decoded numbers of a chart as a GitHub-flavoured table: one row per
+/// category, one column per series. Empty cells are honest gaps, not zeros.
+fn render_chart_data(d: &crate::chart::ChartData) -> String {
+    let width = d
+        .series
+        .iter()
+        .map(|s| s.categories.len().max(s.values.len()))
+        .max()
+        .unwrap_or(0);
+    if width == 0 || d.series.is_empty() {
+        return String::new();
+    }
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    rows.push(
+        std::iter::once(String::new())
+            .chain((0..d.series.len()).map(|i| d.series_label(i)))
+            .collect(),
+    );
+    for i in 0..width {
+        let category = d
+            .series
+            .iter()
+            .filter_map(|s| s.categories.get(i))
+            .find(|c| !c.is_empty())
+            .cloned()
+            .unwrap_or_default();
+        let mut row = vec![category];
+        for s in &d.series {
+            row.push(match s.values.get(i) {
+                Some(Some(v)) => format_number(*v),
+                _ => String::new(),
+            });
+        }
+        rows.push(row);
+    }
+    render_table(&rows)
 }
 
 fn render_table(rows: &[Vec<String>]) -> String {

@@ -17,6 +17,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::chart::ChartData;
 use crate::ir::{Block, BlockContent, ChartBlob, Deck, Paragraph, Role, Slide, TextContent};
 
 /// One semantic difference between two decks.
@@ -101,6 +102,34 @@ pub enum Change {
     /// A table changed shape in a way per-cell reports cannot express (the
     /// two rows being compared have different column counts).
     TableReshaped { slide: usize, description: String },
+    /// A chart gained a series (or the deck's chart data changed shape in a
+    /// way the other chart kinds cannot express — see `MediaChanged`).
+    ChartSeriesAdded { slide: usize, name: String },
+    /// A chart lost a series.
+    ChartSeriesRemoved { slide: usize, name: String },
+    /// The same series slot has a different legend name now.
+    ChartSeriesRenamed {
+        slide: usize,
+        from: String,
+        to: String,
+    },
+    /// A category label on a series changed.
+    ChartCategoryChanged {
+        slide: usize,
+        series: String,
+        index: usize,
+        from: String,
+        to: String,
+    },
+    /// One plotted number says something different — the change that motivates
+    /// the whole feature.
+    ChartValueChanged {
+        slide: usize,
+        series: String,
+        category: String,
+        from: String,
+        to: String,
+    },
     /// A picture was replaced, or its alt text changed; a chart's content or
     /// caption changed.
     MediaChanged {
@@ -127,6 +156,11 @@ impl Change {
             | Change::TableRowAdded { slide, .. }
             | Change::TableRowRemoved { slide, .. }
             | Change::TableReshaped { slide, .. }
+            | Change::ChartSeriesAdded { slide, .. }
+            | Change::ChartSeriesRemoved { slide, .. }
+            | Change::ChartSeriesRenamed { slide, .. }
+            | Change::ChartCategoryChanged { slide, .. }
+            | Change::ChartValueChanged { slide, .. }
             | Change::MediaChanged { slide, .. } => *slide,
         }
     }
@@ -189,6 +223,29 @@ impl Change {
                 format!("- table row {row} {cells:?}")
             }
             Change::TableReshaped { description, .. } => format!("~ table {description}"),
+            Change::ChartSeriesAdded { name, .. } => format!("+ chart series \"{name}\""),
+            Change::ChartSeriesRemoved { name, .. } => format!("- chart series \"{name}\""),
+            Change::ChartSeriesRenamed { from, to, .. } => {
+                format!("~ chart series \"{from}\" -> \"{to}\"")
+            }
+            Change::ChartCategoryChanged {
+                series,
+                index,
+                from,
+                to,
+                ..
+            } => {
+                format!("~ chart category {index} of \"{series}\" \"{from}\" -> \"{to}\"")
+            }
+            Change::ChartValueChanged {
+                series,
+                category,
+                from,
+                to,
+                ..
+            } => {
+                format!("~ chart value \"{series}\" / \"{category}\" {from} -> {to}")
+            }
             Change::MediaChanged {
                 role, description, ..
             } => {
@@ -427,11 +484,13 @@ fn diff_block(number: usize, old: &Block, new: &Block, out: &mut Vec<Change>) {
         (
             BlockContent::Chart {
                 caption: ca,
+                data: da,
                 blob: ba,
                 ..
             },
             BlockContent::Chart {
                 caption: cb,
+                data: db,
                 blob: bb,
                 ..
             },
@@ -443,14 +502,9 @@ fn diff_block(number: usize, old: &Block, new: &Block, out: &mut Vec<Change>) {
                     description: format!("chart caption {} -> {}", quote_opt(ca), quote_opt(cb)),
                 });
             }
-            // The chart is opaque bytes until numeric extraction lands; a byte
-            // difference is still a real, reportable change.
-            match (chart_xml_of(ba), chart_xml_of(bb)) {
-                (Some(x), Some(y)) if x != y => out.push(Change::MediaChanged {
-                    slide: number,
-                    role: old.role,
-                    description: "chart content changed".to_string(),
-                }),
+            match (da, db) {
+                // Both sides decoded: the diff speaks in numbers.
+                (Some(a), Some(b)) => diff_chart_data(number, a, b, out),
                 (Some(_), None) => out.push(Change::MediaChanged {
                     slide: number,
                     role: old.role,
@@ -461,7 +515,23 @@ fn diff_block(number: usize, old: &Block, new: &Block, out: &mut Vec<Change>) {
                     role: old.role,
                     description: "chart data added".to_string(),
                 }),
-                _ => {}
+                // Neither side decoded: fall back to a byte comparison of the
+                // real chart XML — still a reportable change even though it
+                // cannot be named.
+                (None, None) => {
+                    let differ = match (blob_chart_part(ba), blob_chart_part(bb)) {
+                        (Some(x), Some(y)) => x.bytes != y.bytes,
+                        (Some(_), None) | (None, Some(_)) => true,
+                        (None, None) => false,
+                    };
+                    if differ {
+                        out.push(Change::MediaChanged {
+                            slide: number,
+                            role: old.role,
+                            description: "chart content changed".to_string(),
+                        });
+                    }
+                }
             }
         }
         (a, b) if a != b => out.push(Change::MediaChanged {
@@ -619,9 +689,109 @@ fn kind_of(content: &BlockContent) -> &'static str {
     }
 }
 
-/// The chart XML a blob carries, for byte-level comparison.
-fn chart_xml_of(b: &Option<ChartBlob>) -> Option<&str> {
-    b.as_ref().map(|blob| blob.chart_xml.as_str())
+/// The real chart XML part of a captured blob, if the blob carries one.
+fn blob_chart_part(b: &Option<ChartBlob>) -> Option<&crate::ir::ChartPart> {
+    b.as_ref().and_then(crate::chart::chart_xml_part)
+}
+
+/// Diff two decoded charts, series by series and point by point.
+///
+/// Series are paired by index (a chart's series order is meaningful), so a
+/// rename and a reorder look different — which is the honest reading. A
+/// structural mismatch beyond that (categories appearing or vanishing) is one
+/// `MediaChanged` per series rather than a storm of per-point reports.
+fn diff_chart_data(number: usize, a: &ChartData, b: &ChartData, out: &mut Vec<Change>) {
+    let shared = a.series.len().min(b.series.len());
+    for i in shared..a.series.len() {
+        out.push(Change::ChartSeriesRemoved {
+            slide: number,
+            name: a.series_label(i),
+        });
+    }
+    for i in shared..b.series.len() {
+        out.push(Change::ChartSeriesAdded {
+            slide: number,
+            name: b.series_label(i),
+        });
+    }
+
+    for i in 0..shared {
+        let (sa, sb) = (&a.series[i], &b.series[i]);
+        let label = b.series_label(i);
+        let name = |s: &Option<String>| s.clone().unwrap_or_else(|| label.clone());
+
+        match (sa.name.clone(), sb.name.clone()) {
+            (Some(x), Some(y)) if x != y => {
+                out.push(Change::ChartSeriesRenamed {
+                    slide: number,
+                    from: x,
+                    to: y,
+                });
+            }
+            _ => {}
+        }
+
+        // Category labels, position by position.
+        let cat_shared = sa.categories.len().min(sb.categories.len());
+        for c in 0..cat_shared {
+            if sa.categories[c] != sb.categories[c] {
+                out.push(Change::ChartCategoryChanged {
+                    slide: number,
+                    series: name(&sa.name),
+                    index: c + 1,
+                    from: sa.categories[c].clone(),
+                    to: sb.categories[c].clone(),
+                });
+            }
+        }
+
+        // Values, position by position. `(empty)` is the missing-cell mark —
+        // a gap and a zero are different things and must not diff as equal.
+        let val_shared = sa.values.len().min(sb.values.len());
+        for c in 0..val_shared {
+            if sa.values[c] != sb.values[c] {
+                let category = sb
+                    .categories
+                    .get(c)
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| format!("point {}", c + 1));
+                out.push(Change::ChartValueChanged {
+                    slide: number,
+                    series: name(&sa.name),
+                    category,
+                    from: fmt_point(sa.values[c]),
+                    to: fmt_point(sb.values[c]),
+                });
+            }
+        }
+
+        if sa.categories.len() != sb.categories.len() || sa.values.len() != sb.values.len() {
+            out.push(Change::MediaChanged {
+                slide: number,
+                role: Role::Chart,
+                description: format!(
+                    "series \"{label}\" changed shape ({} -> {} categories)",
+                    sa.categories.len().max(sa.values.len()),
+                    sb.categories.len().max(sb.values.len()),
+                ),
+            });
+        }
+    }
+}
+
+/// One plotted point as text: `3`, `1.5`, or `(empty)` for a gap.
+fn fmt_point(v: Option<f64>) -> String {
+    match v {
+        Some(v) => {
+            if v.fract() == 0.0 && v.abs() < 1e15 {
+                format!("{}", v as i64)
+            } else {
+                format!("{v}")
+            }
+        }
+        None => "(empty)".to_string(),
+    }
 }
 
 fn quote_opt(s: &Option<String>) -> String {

@@ -196,11 +196,13 @@ not `skipped` — so `deckr check` on a real, chart-bearing deck reads
 assert byte-identity of all three parts through both `pptx → json → pptx` and
 `pptx → pptx`.
 
-What stays deferred to 0.4 is *semantic* access to the numbers: turning
-`ChartBlob` into `ChartData` (series × categories → values) is what eventually
-enables real numbers in the Markdown export and vector redraw in `render`. Until
-then, a chart is a faithful but opaque block: an honest, byte-exact copy, not an
-empty frame masquerading as a render.
+Since 0.4 the numbers are no longer fully opaque: `chart.rs` decodes the
+captured chart XML into `ChartData` (series × categories → values), which is
+what the Markdown export, the semantic diff and the renderer now consume. The
+write side is unchanged by design — the chart is still re-emitted byte-for-byte,
+because re-authoring a chart from edited numbers means serialising a valid
+`c:chartSpace` from scratch, and that is a future phase of its own. Until then
+a chart is a faithful, byte-exact copy that *also* answers "what did it say".
 
 ## 8. What we deliberately do not do (yet)
 
@@ -210,7 +212,7 @@ empty frame masquerading as a render.
 | Render to SVG (vector preview) | **Shipped in 0.3** — `deckr render` is pure-SVG, no native deps | 0.3 |
 | Rasterise to PNG | **Shipped in 0.3** — `deckr render --png` uses `resvg` (pure Rust), no system libs | 0.3 |
 | Rasterise to PDF | Needs a PDF backend on top of the PNG; the SVG/PNG path already covers "actually look at it" | later |
-| Read chart numbers | Capture ships in 0.2; decoding the `ChartBlob` into `ChartData` is a separate pass | 0.4 |
+| Read chart numbers | **Shipped in 0.4** — `ChartBlob` → `ChartData`: series × categories → values decoded from the captured chart XML; feeds Markdown, diff and render | 0.4 |
 | Semantic diff between decks | **Shipped in 0.4** — `deckr diff` compares the IRs: slides by position, blocks by role, text paragraph by paragraph, tables cell by cell | 0.4 |
 | Notes, animations, audio/video | Real, but lower value per line of code now that picture + chart media round-trip | later |
 
@@ -226,6 +228,7 @@ deckr
 │   ├── parts.rs     OPC scaffolding: content types, rels, master, layouts, theme
 │   ├── build.rs     Deck IR -> .pptx, plus BuildReport; the Chrome trait lives here
 │   ├── template.rs  .potx reuse: load a template's chrome, impl Chrome for it
+│   ├── chart.rs     chart number decoding: chart XML -> ChartData
 │   ├── diff.rs      Deck IR <-> Deck IR: the semantic diff and its Change list
 │   ├── render.rs    Deck IR -> SVG preview -> PNG (resvg)
 │   ├── error.rs     one error type for every stage

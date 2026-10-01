@@ -1214,6 +1214,7 @@ mod tests {
                         content: BlockContent::Chart {
                             caption: None,
                             blob: None,
+                            data: None,
                             rid: None,
                             uri: None,
                         },

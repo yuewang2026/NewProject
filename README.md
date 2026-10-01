@@ -102,13 +102,15 @@ Three things fall out of having a real IR instead of string munging:
 
 Already handled: titles and free-form text boxes, nested bullet levels, soft
 line breaks, tables, pictures (with alt text *and* their media bytes), charts
-(captured verbatim, embedded workbook included), empty placeholders, page
-furniture, per-run formatting (bold, italic, underline, strike, size, colour,
-hyperlinks), **and slide order as the author intended it** rather than as
-filenames sort it.
+(captured verbatim, embedded workbook included, **and their numbers decoded** —
+series, categories and values travel through the IR, the Markdown export and
+the diff), empty placeholders, page furniture, per-run formatting (bold,
+italic, underline, strike, size, colour, hyperlinks), **and slide order as the
+author intended it** rather than as filenames sort it.
 
-Still missing, deliberately: decoding chart *numbers* into editable data, and
-SmartArt (diagram) round-tripping.
+Still missing, deliberately: writing charts back from edited numbers (the
+chart is still re-emitted verbatim — deckr cannot yet re-author a chart's
+data), and SmartArt (diagram) round-tripping.
 
 ### Templates: your theme, not ours
 
@@ -233,6 +235,12 @@ Read it. Diff it. Build it back.
 
 `[chart]`
 
+|  | Revenue | Cost |
+| --- | --- | --- |
+| Q1 | 1.5 | 1.1 |
+| Q2 | 2.5 |  |
+| Q3 | 3.5 | 3.9 |
+
 ![architecture diagram](media://slide1)
 
 ---
@@ -260,8 +268,9 @@ would bake a duplicate into the file.
 No PowerPoint and no LibreOffice is involved anywhere in CI, so "it opens" has
 to be proved structurally. Two layers:
 
-- 80 tests — 63 unit, 7 integration against the generated fixture, 4 covering
-  the `.potx` template-reuse feature, 5 covering the semantic diff, 1 doctest.
+- 93 tests — 69 unit, 7 integration against the generated fixture, 4 covering
+  the `.potx` template-reuse feature, 5 covering the semantic diff, 7 covering
+  chart number decoding, 1 doctest.
 - `tests/fixtures/validate_pptx.py`, a standard-library-only checker that treats every generated `.pptx` as an OPC package and asserts all seven properties a consumer actually relies on: every XML part parses, every declared part exists, every part is declared, every internal relationship resolves, every `r:id` referenced in XML is defined, the presentation's slide list resolves, and shape ids are unique within each slide.
 
 It lives outside the Rust tests on purpose. When it fails, the bug is in our
@@ -437,11 +446,13 @@ deckr 的立场相反：**不允许你指定几何位置，只允许你声明语
 | `deckr diff` | 已完成 | 两份 deck 的语义 diff |
 
 已支持：标题与自由文本框、多层缩进的项目符号、软换行、表格、图片（含 alt
-文本与媒体字节）、图表（原样捕获，含内嵌工作簿）、空占位符、页眉页码等页面装饰、
+文本与媒体字节）、图表（原样捕获，含内嵌工作簿，**数字也会被解码** —— 序列、
+类目、数值贯穿 IR、Markdown 导出与 diff）、空占位符、页眉页码等页面装饰、
 run 级排版（粗斜体、下划线、删除线、字号、颜色、超链接），**以及作者真正想要的
 页序**，而不是文件名排序的页序。
 
-有意暂缺：把图表*数字*解码成可编辑数据、SmartArt（图示）的往返。
+有意暂缺：用改过的数字把图表*写回*（图表仍然原样重发 —— deckr 尚不能重新编辑
+图表数据）、SmartArt（图示）的往返。
 
 ### 模板：用你的主题，不是我们的
 
@@ -561,6 +572,12 @@ Read it. Diff it. Build it back.
 
 `[chart]`
 
+|  | Revenue | Cost |
+| --- | --- | --- |
+| Q1 | 1.5 | 1.1 |
+| Q2 | 2.5 |  |
+| Q3 | 3.5 | 3.9 |
+
 ![architecture diagram](media://slide1)
 
 ---
@@ -587,8 +604,9 @@ Read it. Diff it. Build it back.
 CI 里全程没有 PowerPoint，也没有 LibreOffice，所以「打得开」只能靠结构证明。
 两层保障：
 
-- 80 个测试 —— 63 个单元测试、7 个针对生成 fixture 的集成测试、4 个覆盖 `.potx`
-  模板复用功能的集成测试、5 个覆盖语义 diff 的集成测试、1 个文档测试。
+- 93 个测试 —— 69 个单元测试、7 个针对生成 fixture 的集成测试、4 个覆盖 `.potx`
+  模板复用功能的集成测试、5 个覆盖语义 diff 的集成测试、7 个覆盖图表数字解码的
+  集成测试、1 个文档测试。
 - `tests/fixtures/validate_pptx.py`，一个只用标准库的校验器。它把每个生成的 `.pptx` 当作 OPC 包来查，断言七项真正会被消费方依赖的性质：每个 XML part 能解析、声明的 part 都存在、存在的 part 都被声明、每个内部关系都能落地、XML 里引用的每个 `r:id` 都有定义、presentation 的页序能解析、以及每页内 shape id 不重复。
 
 它刻意放在 Rust 测试之外。当它报错时，问题出在我们对 OPC 的理解上，而不是在我们
