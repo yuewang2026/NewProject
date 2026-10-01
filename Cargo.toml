@@ -38,6 +38,12 @@ base64 = "0.22"
 # `resvg`, a pure-Rust SVG renderer (no Cairo/HarfBuzz/system fontconfig on
 # Windows), so it still builds on the GNU toolchain without native deps.
 resvg = "0.44"
+# The `render --pdf` path packs the same rasters into one PDF; flate2 (the
+# same crate zip already brings in) compresses the image streams, and the
+# `png` crate (already in through resvg) decodes the rasters back to pixels.
+# Both are zero-cost additions to the graph.
+flate2 = "1"
+png = "0.17"
 
 # Keep the dependency graph honest and the test suite fast.
 

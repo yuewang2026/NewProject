@@ -211,7 +211,7 @@ a chart is a faithful, byte-exact copy that *also* answers "what did it say".
 | Reuse your `.potx` template | **Shipped in 0.3** — a `Chrome` trait decouples the writer from the scaffolding; `Template` copies the template's theme/master/layouts verbatim and re-parses its placeholder geometry | 0.3 |
 | Render to SVG (vector preview) | **Shipped in 0.3** — `deckr render` is pure-SVG, no native deps | 0.3 |
 | Rasterise to PNG | **Shipped in 0.3** — `deckr render --png` uses `resvg` (pure Rust), no system libs | 0.3 |
-| Rasterise to PDF | Needs a PDF backend on top of the PNG; the SVG/PNG path already covers "actually look at it" | later |
+| Rasterise to PDF | **Shipped in 0.4** — `deckr render --pdf` assembles the rasters into one deterministic PDF (hand-rolled writer; `flate2`/`png` already in the tree) | 0.4 |
 | Read chart numbers | **Shipped in 0.4** — `ChartBlob` → `ChartData`: series × categories → values decoded from the captured chart XML; feeds Markdown, diff and render | 0.4 |
 | Semantic diff between decks | **Shipped in 0.4** — `deckr diff` compares the IRs: slides by position, blocks by role, text paragraph by paragraph, tables cell by cell | 0.4 |
 | Notes, animations, audio/video | Real, but lower value per line of code now that picture + chart media round-trip | later |
@@ -231,6 +231,7 @@ deckr
 │   ├── chart.rs     chart number decoding: chart XML -> ChartData
 │   ├── diff.rs      Deck IR <-> Deck IR: the semantic diff and its Change list
 │   ├── render.rs    Deck IR -> SVG preview -> PNG (resvg)
+│   ├── pdf.rs       slide rasters -> one deterministic PDF (hand-rolled writer)
 │   ├── error.rs     one error type for every stage
 │   └── bin/deckr.rs CLI
 ├── examples/roundtrip.rs   the README snippet, compiled so docs cannot rot

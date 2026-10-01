@@ -181,6 +181,24 @@ headings inside it mark the phases, not releases.
   a deliberate gap in Cost's Q2), so every consumer above is tested against
   actual numbers in CI.
 
+### Added — PDF assembly (0.4)
+
+- `deckr render --pdf` — assemble every slide into **one PDF**: one page per
+  slide, each page the rasterised preview at 1 px = 1 pt, so the 960×540 SVG
+  becomes a 13.3×7.5 inch 16:9 page (PowerPoint's own default size). Output is
+  a single `slides.pdf` beside the SVG/PNG gallery.
+- The PDF writer is hand-rolled and dependency-light rather than a `printpdf`
+  import: catalog, pages tree, per-page (page, content stream, image XObject)
+  objects and a byte-exact xref table. Image streams are RGBA composited over
+  white, packed RGB and flate-compressed — `flate2` and `png` were already in
+  the dependency tree through `zip` and `resvg`, so the feature adds zero new
+  transitive crates.
+- New public API: `render_deck_pdf`, `rasterise_svg_rgba`, `PdfPage`. As with
+  everything deckr emits, two builds of the same deck are byte-identical.
+- Covered by 6 unit tests (structure, alpha compositing, stream lengths vs
+  declared lengths, xref offsets, determinism, page tree) and 4 integration
+  tests against the real fixture.
+
 ### Known limitations
 
 - Charts are read (their numbers now decode into the IR) but still written
@@ -189,7 +207,6 @@ headings inside it mark the phases, not releases.
   possible yet.
 - Diagrams (SmartArt) are detected and reported as skipped; they are not yet
   written back.
-- PDF rasterisation (PNG is shipped; PDF is not) is not done yet.
 - Notes, animations, speaker notes masters and media beyond pictures are ignored.
 
 [Unreleased]: https://github.com/yuewang2026/deckr-pptx-oxide/compare/v0.1.0...HEAD

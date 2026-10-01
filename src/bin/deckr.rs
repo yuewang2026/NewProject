@@ -106,6 +106,10 @@ enum Command {
         /// Also rasterise each slide to `slide_N.png` with resvg.
         #[arg(long)]
         png: bool,
+        /// Also assemble every slide into one `slides.pdf` (one page per
+        /// slide, the raster preview at 1 px = 1 pt).
+        #[arg(long)]
+        pdf: bool,
     },
 }
 
@@ -283,7 +287,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Render { file, out, png } => {
+        Command::Render {
+            file,
+            out,
+            png,
+            pdf,
+        } => {
             let deck = deckr::read_pptx(&file)?;
             std::fs::create_dir_all(&out)?;
             let pages = deckr::render_deck_svgs(&deck);
@@ -302,6 +311,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 println!("  rasterised {written} slide(s) to PNG");
+            }
+            if pdf {
+                match deckr::render_deck_pdf(&deck) {
+                    Ok(bytes) => {
+                        let path = out.join("slides.pdf");
+                        std::fs::write(&path, &bytes)?;
+                        println!("  wrote {} ({} page(s))", path.display(), pages.len());
+                    }
+                    Err(e) => eprintln!("  warning: could not build the PDF: {e}"),
+                }
             }
             std::fs::write(out.join("index.html"), gallery_html(&pages, png))?;
             println!("rendered {} slide(s) to {}", pages.len(), out.display());
