@@ -199,14 +199,37 @@ headings inside it mark the phases, not releases.
   declared lengths, xref offsets, determinism, page tree) and 4 integration
   tests against the real fixture.
 
+### Added — diagram (SmartArt) round-trip (0.4)
+
+- **Diagrams survive round trips.** A `dgm:relIds` frame's whole subgraph —
+  the data model, layout, quick style and colours the slide references, plus
+  everything their relationship graph reaches (the pre-rendered drawing and
+  its rels) — is captured verbatim (`DiagramBlob` / `DiagramPart`) and
+  re-emitted untouched. The writer rebuilds the `dgm:relIds` frame with fresh
+  relationship ids, restores every part at its original path (so the data
+  part's rels resolve unchanged) and registers the content types. `deckr
+  check` on a deck with a diagram now reports it as written, not unplaceable.
+- **The diagram's words are decoded.** The data model's text points
+  (`dgm:pt > dgm:t`) are extracted in document order into
+  `Diagram { texts }` — best-effort reading over the verbatim blob, exactly
+  like a chart's numbers. The Markdown export lists them as bullets under the
+  `[diagram]` marker; the semantic diff reports a reworded node as a
+  `ParagraphChanged` on the `diagram` role, and an unchanged text with changed
+  data-model bytes as "diagram structure changed".
+- New public API: `DiagramBlob`, `DiagramPart`, and the widened
+  `BlockContent::Diagram` (serialised through the JSON IR, blob base64 as
+  before). The fixture now ships a real three-node diagram, so all of the
+  above is tested against an actual SmartArt in CI.
+
 ### Known limitations
 
 - Charts are read (their numbers now decode into the IR) but still written
   back **verbatim** — deckr cannot yet re-author a chart from edited numbers.
   Nothing is lost on the way through, but editing a chart's data is not
   possible yet.
-- Diagrams (SmartArt) are detected and reported as skipped; they are not yet
-  written back.
+- Diagrams round-trip verbatim with their text points decoded, but deckr
+  cannot yet re-author a diagram from edited text (the subgraph is re-emitted
+  as captured).
 - Notes, animations, speaker notes masters and media beyond pictures are ignored.
 
 [Unreleased]: https://github.com/yuewang2026/deckr-pptx-oxide/compare/v0.1.0...HEAD

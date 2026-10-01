@@ -130,7 +130,12 @@ fn parse_slide(index: usize, lines: &[&str]) -> Slide {
         if trimmed == "`[diagram]`" {
             blocks.push(Block {
                 role: Role::Diagram,
-                content: BlockContent::Diagram { caption: None },
+                content: BlockContent::Diagram {
+                    caption: None,
+                    texts: Vec::new(),
+                    blob: None,
+                    rel_ids: Vec::new(),
+                },
             });
             i += 1;
             continue;

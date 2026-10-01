@@ -104,13 +104,17 @@ Already handled: titles and free-form text boxes, nested bullet levels, soft
 line breaks, tables, pictures (with alt text *and* their media bytes), charts
 (captured verbatim, embedded workbook included, **and their numbers decoded** —
 series, categories and values travel through the IR, the Markdown export and
-the diff), empty placeholders, page furniture, per-run formatting (bold,
-italic, underline, strike, size, colour, hyperlinks), **and slide order as the
-author intended it** rather than as filenames sort it.
+the diff), diagrams (SmartArt: the whole subgraph — data model, layout, quick
+style, colours, pre-rendered drawing — captured verbatim and rebuilt, with the
+diagram's text points decoded for the Markdown export and the diff), empty
+placeholders, page furniture, per-run formatting (bold, italic, underline,
+strike, size, colour, hyperlinks), **and slide order as the author intended
+it** rather than as filenames sort it.
 
 Still missing, deliberately: writing charts back from edited numbers (the
 chart is still re-emitted verbatim — deckr cannot yet re-author a chart's
-data), and SmartArt (diagram) round-tripping.
+data), and re-authoring diagrams from edited text (same story: the subgraph is
+re-emitted verbatim).
 
 ### Templates: your theme, not ours
 
@@ -453,12 +457,14 @@ deckr 的立场相反：**不允许你指定几何位置，只允许你声明语
 
 已支持：标题与自由文本框、多层缩进的项目符号、软换行、表格、图片（含 alt
 文本与媒体字节）、图表（原样捕获，含内嵌工作簿，**数字也会被解码** —— 序列、
-类目、数值贯穿 IR、Markdown 导出与 diff）、空占位符、页眉页码等页面装饰、
-run 级排版（粗斜体、下划线、删除线、字号、颜色、超链接），**以及作者真正想要的
-页序**，而不是文件名排序的页序。
+类目、数值贯穿 IR、Markdown 导出与 diff）、图示（SmartArt：数据模型、版式、
+快速样式、配色、预渲染绘图整体原样捕获并重建，数据模型里的文本点会被解码供
+Markdown 导出与 diff 使用）、空占位符、页眉页码等页面装饰、run 级排版（粗斜体、
+下划线、删除线、字号、颜色、超链接），**以及作者真正想要的页序**，而不是文件名
+排序的页序。
 
 有意暂缺：用改过的数字把图表*写回*（图表仍然原样重发 —— deckr 尚不能重新编辑
-图表数据）、SmartArt（图示）的往返。
+图表数据）、从改过的文本重新生成图示（同样原样重发）。
 
 ### 模板：用你的主题，不是我们的
 

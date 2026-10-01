@@ -120,7 +120,7 @@ pub fn render_slide(slide: &Slide) -> String {
             BlockContent::Chart { .. } => {
                 y = render_media_box(&mut body, y, "chart", None);
             }
-            BlockContent::Diagram { caption } => {
+            BlockContent::Diagram { caption, .. } => {
                 y = render_media_box(&mut body, y, "diagram", caption.as_deref());
             }
             BlockContent::Empty => {}

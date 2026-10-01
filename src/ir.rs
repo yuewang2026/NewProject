@@ -260,8 +260,22 @@ pub enum BlockContent {
         #[serde(skip)]
         uri: Option<String>,
     },
+    /// A diagram (SmartArt), preserved verbatim like a chart. `blob` holds the
+    /// four parts the slide's `dgm:relIds` references (data model, layout,
+    /// quick style, colours) plus everything their relationship graph reaches
+    /// (the pre-rendered drawing, its rels). `texts` is the decoded reading —
+    /// the text points of the data model, in document order. The writer
+    /// ignores a diagram whose `blob` is `None`.
     Diagram {
         caption: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        texts: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blob: Option<DiagramBlob>,
+        /// Read-side scratch: the `r:dm`/`r:lo`/`r:qs`/`r:cs` ids the source
+        /// used, consumed by the reader's media-resolution pass.
+        #[serde(skip)]
+        rel_ids: Vec<String>,
     },
     Empty,
 }
@@ -298,6 +312,30 @@ pub struct ChartPart {
     /// Its content type, copied from the source `[Content_Types].xml` so the
     /// writer can register an Override for it.
     pub content_type: String,
+}
+
+/// One part of a diagram's subgraph, verbatim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiagramPart {
+    /// Part name within the package, e.g. `ppt/diagrams/data1.xml`.
+    pub path: String,
+    /// The part's bytes, base64-encoded in JSON.
+    #[serde(with = "base64_bytes")]
+    pub bytes: Vec<u8>,
+    /// Its content type, copied from the source `[Content_Types].xml` so the
+    /// writer can register an Override for it.
+    pub content_type: String,
+}
+
+/// Everything a diagram needs to be written back exactly as it came in — the
+/// diagram counterpart of [`ChartBlob`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DiagramBlob {
+    /// The captured parts: the data model, layout, quick style and colours the
+    /// slide references, plus (through the data part's relationships) the
+    /// pre-rendered drawing PowerPoint uses to display the diagram without
+    /// recalculating it.
+    pub parts: Vec<DiagramPart>,
 }
 
 /// A run of paragraphs belonging to one placeholder.

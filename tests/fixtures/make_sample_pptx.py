@@ -26,6 +26,11 @@ CONTENT_TYPES = XML + f'''<Types xmlns="http://schemas.openxmlformats.org/packag
 <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
 <Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
 <Override PartName="/ppt/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+<Override PartName="/ppt/diagrams/data1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml"/>
+<Override PartName="/ppt/diagrams/layout1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.diagramLayout+xml"/>
+<Override PartName="/ppt/diagrams/quickStyle1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.diagramStyle+xml"/>
+<Override PartName="/ppt/diagrams/colors1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.diagramColors+xml"/>
+<Override PartName="/ppt/diagrams/drawing1.xml" ContentType="application/vnd.ms-office.drawingml.diagramDrawing+xml"/>
 </Types>'''
 
 ROOT_RELS = XML + '''<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -104,6 +109,13 @@ SLIDE2 = XML + f'''<p:sld {NS_P} {NS_A} {NS_R}>{HEAD}
   <p:nvPicPr><p:cNvPr id="5" name="Picture 4" descr="architecture diagram"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
   <p:blipFill><a:blip r:embed="rId8"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
 </p:pic>
+<p:graphicFrame>
+  <p:nvGraphicFramePr><p:cNvPr id="7" name="Diagram 6"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+  <p:xfrm><a:off x="5486400" y="3429000"/><a:ext cx="3657600" cy="1828800"/></p:xfrm>
+  <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram">
+    <dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:dm="rId10" r:lo="rId11" r:qs="rId12" r:cs="rId13"/>
+  </a:graphicData></a:graphic>
+</p:graphicFrame>
 <p:sp>
   <p:nvSpPr><p:cNvPr id="6" name="Freeform 5"/><p:nvPr/></p:nvSpPr>
   <p:txBody><a:p><a:r><a:t>internal only</a:t></a:r></a:p></p:txBody>
@@ -115,6 +127,10 @@ SLIDE2 = XML + f'''<p:sld {NS_P} {NS_A} {NS_R}>{HEAD}
 SLIDE2_RELS = XML + '''<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
 <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>
+<Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="../diagrams/data1.xml"/>
+<Relationship Id="rId11" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout" Target="../diagrams/layout1.xml"/>
+<Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle" Target="../diagrams/quickStyle1.xml"/>
+<Relationship Id="rId13" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors" Target="../diagrams/colors1.xml"/>
 </Relationships>'''
 
 CHART1 = XML + f'''<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" {NS_A} {NS_R}>
@@ -213,6 +229,45 @@ def make_minimal_xlsx() -> bytes:
     return buf.getvalue()
 
 
+# ---------------------------------------------------------------- diagrams
+# A minimal SmartArt: three nodes hanging off the document root. The data
+# model carries the text points deckr decodes; the drawing part is what
+# PowerPoint renders from without recalculating. layout/quickStyle/colours
+# are well-formed stubs — deckr captures them verbatim without parsing.
+DIAGRAM_DATA = XML + '''<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<dgm:ptLst>
+<dgm:pt modelId="0" type="doc"><dgm:prSet phldr="1"/></dgm:pt>
+<dgm:pt modelId="1" type="node"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Collect</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="2" type="node"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Convert</a:t></a:r></a:p></dgm:t></dgm:pt>
+<dgm:pt modelId="3" type="node"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Ship</a:t></a:r></a:p></dgm:t></dgm:pt>
+</dgm:ptLst>
+<dgm:cxnLst>
+<dgm:cxn modelId="4" srcId="0" destId="1" srcOrd="0" destOrd="0"/>
+<dgm:cxn modelId="5" srcId="0" destId="2" srcOrd="1" destOrd="0"/>
+<dgm:cxn modelId="6" srcId="0" destId="3" srcOrd="2" destOrd="0"/>
+</dgm:cxnLst>
+<dgm:bg/><dgm:whole/>
+</dgm:dataModel>'''
+
+DIAGRAM_DATA_RELS = XML + '''<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="drawing1.xml"/>
+</Relationships>'''
+
+DIAGRAM_LAYOUT = XML + '''<dgm:layoutDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:deckr/test-layout">
+<dgm:title val=""/><dgm:desc val=""/>
+</dgm:layoutDef>'''
+
+DIAGRAM_QS = XML + '''<dgm:styleDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:deckr/test-style">
+</dgm:styleDef>'''
+
+DIAGRAM_COLORS = XML + '''<dgm:colorsDef xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" uniqueId="urn:deckr/test-colors">
+</dgm:colorsDef>'''
+
+DIAGRAM_DRAWING = XML + '''<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<dsp:spTree><dsp:nvGrpSpPr/><dsp:grpSpPr/></dsp:spTree>
+</dsp:drawing>'''
+
+
 PARTS = [
     ("[Content_Types].xml", CONTENT_TYPES),
     ("_rels/.rels", ROOT_RELS),
@@ -224,6 +279,12 @@ PARTS = [
     ("ppt/charts/chart1.xml", CHART1),
     ("ppt/charts/_rels/chart1.xml.rels", CHART1_RELS),
     ("ppt/embeddings/workbook1.xlsx", make_minimal_xlsx()),
+    ("ppt/diagrams/data1.xml", DIAGRAM_DATA),
+    ("ppt/diagrams/_rels/data1.xml.rels", DIAGRAM_DATA_RELS),
+    ("ppt/diagrams/layout1.xml", DIAGRAM_LAYOUT),
+    ("ppt/diagrams/quickStyle1.xml", DIAGRAM_QS),
+    ("ppt/diagrams/colors1.xml", DIAGRAM_COLORS),
+    ("ppt/diagrams/drawing1.xml", DIAGRAM_DRAWING),
 ]
 
 

@@ -534,6 +534,38 @@ fn diff_block(number: usize, old: &Block, new: &Block, out: &mut Vec<Change>) {
                 }
             }
         }
+        (
+            BlockContent::Diagram {
+                texts: ta,
+                blob: ba,
+                ..
+            },
+            BlockContent::Diagram {
+                texts: tb,
+                blob: bb,
+                ..
+            },
+        ) => {
+            // The decoded text points diff like bullets; a reworded node is a
+            // ParagraphChanged on the `diagram` role.
+            let as_content = |texts: &[String]| TextContent {
+                paragraphs: texts.iter().map(|t| Paragraph::new(0, t.clone())).collect(),
+            };
+            diff_text(number, old.role, &as_content(ta), &as_content(tb), out);
+
+            // Identical text but different data-model bytes means the shape
+            // changed without the words changing — connections, layout hints.
+            if ta == tb
+                && data_part_bytes(ba) != data_part_bytes(bb)
+                && (ba.is_some() || bb.is_some())
+            {
+                out.push(Change::MediaChanged {
+                    slide: number,
+                    role: old.role,
+                    description: "diagram structure changed".to_string(),
+                });
+            }
+        }
         (a, b) if a != b => out.push(Change::MediaChanged {
             slide: number,
             role: old.role,
@@ -670,7 +702,7 @@ fn describe_block(b: &Block) -> String {
             Some(c) => format!("chart \"{c}\""),
             None => "chart".to_string(),
         },
-        BlockContent::Diagram { caption } => match caption {
+        BlockContent::Diagram { caption, .. } => match caption {
             Some(c) => format!("diagram \"{c}\""),
             None => "diagram".to_string(),
         },
@@ -692,6 +724,15 @@ fn kind_of(content: &BlockContent) -> &'static str {
 /// The real chart XML part of a captured blob, if the blob carries one.
 fn blob_chart_part(b: &Option<ChartBlob>) -> Option<&crate::ir::ChartPart> {
     b.as_ref().and_then(crate::chart::chart_xml_part)
+}
+
+/// The data-model bytes of a captured diagram blob, for byte-level comparison.
+fn data_part_bytes(b: &Option<crate::ir::DiagramBlob>) -> Option<&[u8]> {
+    b.as_ref()?
+        .parts
+        .iter()
+        .find(|p| p.content_type.contains("diagramData"))
+        .map(|p| p.bytes.as_slice())
 }
 
 /// Diff two decoded charts, series by series and point by point.

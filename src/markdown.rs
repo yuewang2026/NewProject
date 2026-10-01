@@ -55,6 +55,17 @@ fn render_slide(out: &mut String, slide: &Slide) {
                 out.push_str(&render_chart_data(d));
             }
             BlockContent::Chart { .. } => out.push_str("`[chart]`\n\n"),
+            // Diagrams cannot yet be re-authored from Markdown, so they export
+            // as a marker that survives the round trip as itself. When the
+            // data model's text points were decoded, they ride along as
+            // bullets — the words the diagram shows, not its geometry.
+            BlockContent::Diagram { texts, .. } if !texts.is_empty() => {
+                out.push_str("`[diagram]`\n\n");
+                for t in texts {
+                    out.push_str(&format!("- {}\n", t.replace('\n', " ")));
+                }
+                out.push('\n');
+            }
             BlockContent::Diagram { .. } => out.push_str("`[diagram]`\n\n"),
             BlockContent::Empty => {}
         }

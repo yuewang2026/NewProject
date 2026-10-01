@@ -22,7 +22,8 @@ use zip::ZipArchive;
 
 use crate::error::{Error, Result};
 use crate::ir::{
-    Block, BlockContent, ChartBlob, ChartPart, Deck, Paragraph, Role, Run, Slide, TextContent,
+    Block, BlockContent, ChartBlob, ChartPart, Deck, DiagramBlob, DiagramPart, Paragraph, Role,
+    Run, Slide, TextContent,
 };
 
 type Pkg = ZipArchive<File>;
@@ -300,6 +301,37 @@ fn resolve_media(
                     None => None,
                 }
             }
+            BlockContent::Diagram { rel_ids, .. } if rel_ids.len() == 4 => {
+                // The four relationships — data model, layout, quick style,
+                // colours — are the diagram's entry points; everything else
+                // (the pre-rendered drawing, its rels) hangs off the data
+                // part's own relationships.
+                let starts: Vec<Option<String>> = rel_ids
+                    .iter()
+                    .map(|rid| rels.get(rid).map(|t| resolve_part(&dir, t)))
+                    .collect();
+                if starts.iter().all(|p| p.is_some()) {
+                    let starts: Vec<String> = starts.into_iter().flatten().collect();
+                    capture_diagram_subgraph(pkg, &starts, ct_overrides, ct_defaults).map(|parts| {
+                        // The data model yields the diagram's text points,
+                        // in document order.
+                        let texts = parts
+                            .iter()
+                            .find(|p| p.content_type.contains("diagramData"))
+                            .and_then(|p| std::str::from_utf8(&p.bytes).ok())
+                            .map(decode_diagram_texts)
+                            .unwrap_or_default();
+                        BlockContent::Diagram {
+                            caption: None,
+                            texts,
+                            blob: Some(DiagramBlob { parts }),
+                            rel_ids: rel_ids.clone(),
+                        }
+                    })
+                } else {
+                    None
+                }
+            }
             _ => None,
         };
         if let Some(content) = replacement {
@@ -379,6 +411,101 @@ fn capture_chart_subgraph(
     }
 
     Some(out)
+}
+
+/// Capture the diagram subgraph: BFS from each of the four entry parts (data
+/// model, layout, quick style, colours), de-duplicated by part name. The data
+/// part's relationships pull in the pre-rendered drawing, the same walk
+/// [`capture_chart_subgraph`] makes for an embedded workbook.
+fn capture_diagram_subgraph(
+    pkg: &mut Pkg,
+    starts: &[String],
+    overrides: &HashMap<String, String>,
+    defaults: &HashMap<String, String>,
+) -> Option<Vec<DiagramPart>> {
+    let mut out: Vec<DiagramPart> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for start in starts {
+        let chart_parts = capture_chart_subgraph(pkg, start, overrides, defaults)?;
+        for part in chart_parts {
+            if seen.insert(part.path.clone()) {
+                out.push(DiagramPart {
+                    path: part.path,
+                    bytes: part.bytes,
+                    content_type: part.content_type,
+                });
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The text points of a diagram data model, in document order.
+///
+/// A `dgm:pt` carries its text inside `dgm:t`, whose paragraphs are ordinary
+/// DrawingML (`a:p > a:r > a:t`). Runs within one point join; points stay
+/// separate entries. Empty points (the `doc` root, layout stubs) yield nothing.
+fn decode_diagram_texts(xml: &str) -> Vec<String> {
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+
+    let mut pt_depth = 0usize;
+    // Depth of the `t` element currently being captured (0 = not capturing).
+    let mut t_depth = 0usize;
+    let mut text = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                let local = local_name(e.name());
+                match local.as_str() {
+                    "pt" => pt_depth += 1,
+                    "t" if pt_depth > 0 => {
+                        t_depth += 1;
+                        if t_depth == 1 {
+                            text.clear();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if t_depth > 0 {
+                    text.push_str(&unescape(e.as_ref()));
+                }
+            }
+            Ok(Event::End(e)) => {
+                let local = local_name(e.name());
+                match local.as_str() {
+                    "pt" => {
+                        pt_depth -= 1;
+                        if t_depth > 0 {
+                            // A point whose `dgm:t` was still open (no text).
+                            t_depth = 0;
+                        }
+                    }
+                    "t" if t_depth > 0 => {
+                        t_depth -= 1;
+                        if t_depth == 0 {
+                            let t = text.trim().to_string();
+                            if !t.is_empty() {
+                                out.push(t);
+                            }
+                            text.clear();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
 }
 
 /// All (id, target) pairs in a relationships part, internal and external.
@@ -676,6 +803,10 @@ struct ShapeBuilder<'a> {
     /// `c:chart/@r:id` and its containing graphicData's `uri`.
     chart_rid: Option<String>,
     chart_uri: Option<String>,
+    /// `dgm:relIds/@r:dm,r:lo,r:qs,r:cs` — the four relationships a diagram
+    /// frame references (data model, layout, quick style, colours), in that
+    /// order.
+    diagram_rels: Vec<String>,
 }
 
 impl<'a> ShapeBuilder<'a> {
@@ -704,6 +835,7 @@ impl<'a> ShapeBuilder<'a> {
             pic_embed: None,
             chart_rid: None,
             chart_uri: None,
+            diagram_rels: Vec::new(),
         }
     }
 
@@ -727,6 +859,16 @@ impl<'a> ShapeBuilder<'a> {
                         // can rebuild the frame, and flag it as a chart.
                         self.chart = true;
                         self.chart_uri = Some(uri);
+                    }
+                }
+            }
+            "relIds" if self.diagram => {
+                // <dgm:relIds r:dm=".." r:lo=".." r:qs=".." r:cs=".."/> — the
+                // four relationships that make up the diagram. `attr` matches
+                // local names, so the `r:` prefixes are already gone.
+                for key in ["dm", "lo", "qs", "cs"] {
+                    if let Some(rid) = attr(e, key) {
+                        self.diagram_rels.push(rid);
                     }
                 }
             }
@@ -898,7 +1040,12 @@ impl<'a> ShapeBuilder<'a> {
                 uri: self.chart_uri,
             }
         } else if self.diagram {
-            BlockContent::Diagram { caption: None }
+            BlockContent::Diagram {
+                caption: None,
+                texts: Vec::new(),
+                blob: None,
+                rel_ids: self.diagram_rels,
+            }
         } else if self.kind == ShapeKind::Picture {
             BlockContent::Picture {
                 alt: self.alt,

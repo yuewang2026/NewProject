@@ -21,7 +21,9 @@ use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
 use crate::error::{Error, Result};
-use crate::ir::{BlockContent, ChartBlob, Deck, Paragraph, Role, Run, Slide, TextContent};
+use crate::ir::{
+    BlockContent, ChartBlob, Deck, DiagramBlob, Paragraph, Role, Run, Slide, TextContent,
+};
 use crate::parts::{self, Rel};
 use crate::template::Template;
 
@@ -47,6 +49,15 @@ const CHART_HEIGHT: i64 = 4_000_000;
 
 const TY_IMAGE: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
 const TY_CHART: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
+/// The four relationships a diagram frame references, in `dgm:relIds` order.
+const TY_DIAGRAM_DATA: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData";
+const TY_DIAGRAM_LAYOUT: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramLayout";
+const TY_DIAGRAM_QS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramQuickStyle";
+const TY_DIAGRAM_COLORS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramColors";
 const TY_HYPERLINK: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 
@@ -442,6 +453,7 @@ fn slide_xml<C: Chrome>(
     // emitted below once we know how many links the slide holds.
     let mut pictures: Vec<(Vec<u8>, Option<String>, Option<String>)> = Vec::new();
     let mut charts: Vec<ChartBlob> = Vec::new();
+    let mut diagrams: Vec<DiagramBlob> = Vec::new();
 
     for block in &slide.blocks {
         if block.is_empty() || block.role.is_chrome() {
@@ -524,8 +536,13 @@ fn slide_xml<C: Chrome>(
                 "slide {}: chart has no captured part to write back",
                 slide.index + 1
             )),
-            BlockContent::Diagram { .. } => report.skipped.push(format!(
-                "slide {}: diagrams (SmartArt) are not yet supported",
+            // A diagram with its captured subgraph is re-emitted verbatim,
+            // exactly like a chart; without one it stays unplaceable.
+            BlockContent::Diagram {
+                blob: Some(blob), ..
+            } => diagrams.push(blob.clone()),
+            BlockContent::Diagram { blob: None, .. } => report.skipped.push(format!(
+                "slide {}: diagram has no captured part to write back",
                 slide.index + 1
             )),
             BlockContent::Empty => {}
@@ -587,6 +604,92 @@ fn slide_xml<C: Chrome>(
         };
         shapes.push_str(&chart_frame(next_id, "Chart", &at, &blob.uri, &chart_xml));
         extra.push(Rel::internal(rid.clone(), TY_CHART, target));
+        next_id += 1;
+        free_top += CHART_HEIGHT + 200_000;
+    }
+    for blob in diagrams {
+        // The frame references the four parts by role; find each by its
+        // content type, the one marker that survives the verbatim capture.
+        let by_type = |suffix: &str| {
+            blob.parts
+                .iter()
+                .find(|p| p.content_type.contains(suffix))
+                .map(|p| p.path.clone())
+        };
+        let roles = [
+            ("diagramData", TY_DIAGRAM_DATA),
+            ("diagramLayout", TY_DIAGRAM_LAYOUT),
+            ("diagramStyle", TY_DIAGRAM_QS),
+            ("diagramColors", TY_DIAGRAM_COLORS),
+        ];
+        let mut found: Vec<Option<String>> = Vec::new();
+        for (suffix, _) in &roles {
+            let path = by_type(suffix);
+            if path.is_none() {
+                report.skipped.push(format!(
+                    "slide {}: diagram is missing its {suffix} part",
+                    slide.index + 1
+                ));
+            }
+            found.push(path);
+        }
+        if found.iter().any(|p| p.is_none()) {
+            continue;
+        }
+        let mut paths = found.into_iter().map(|p| p.unwrap());
+        let data = paths.next().unwrap();
+        let layout = paths.next().unwrap();
+        let style = paths.next().unwrap();
+        let colors = paths.next().unwrap();
+
+        // Every captured part goes back into the package at its original
+        // path, so the data part's own rels (which point at the pre-rendered
+        // drawing) resolve unchanged.
+        for part in &blob.parts {
+            let ct = part.content_type.clone();
+            pending
+                .binaries
+                .push((part.path.clone(), ct.clone(), part.bytes.clone()));
+            pending.types.push((format!("/{}", part.path), ct));
+        }
+
+        let rel_target =
+            |path: &String| format!("../{}", path.strip_prefix("ppt/").unwrap_or(path));
+        let rid_dm = format!("rId{next_rid}");
+        extra.push(Rel::internal(
+            rid_dm.clone(),
+            TY_DIAGRAM_DATA,
+            rel_target(&data),
+        ));
+        let rid_lo = format!("rId{}", next_rid + 1);
+        extra.push(Rel::internal(
+            rid_lo.clone(),
+            TY_DIAGRAM_LAYOUT,
+            rel_target(&layout),
+        ));
+        let rid_qs = format!("rId{}", next_rid + 2);
+        extra.push(Rel::internal(
+            rid_qs.clone(),
+            TY_DIAGRAM_QS,
+            rel_target(&style),
+        ));
+        let rid_cs = format!("rId{}", next_rid + 3);
+        extra.push(Rel::internal(
+            rid_cs.clone(),
+            TY_DIAGRAM_COLORS,
+            rel_target(&colors),
+        ));
+        next_rid += 4;
+
+        let at = Rect {
+            x: CONTENT_LEFT,
+            y: free_top,
+            cx: CHART_WIDTH,
+            cy: CHART_HEIGHT,
+        };
+        shapes.push_str(&diagram_frame(
+            next_id, "Diagram", &at, &rid_dm, &rid_lo, &rid_qs, &rid_cs,
+        ));
         next_id += 1;
         free_top += CHART_HEIGHT + 200_000;
     }
@@ -707,6 +810,36 @@ fn chart_frame(id: u32, name: &str, at: &Rect, uri: &str, chart_xml: &str) -> St
         cy = at.cy,
         uri = parts::esc_attr(uri),
         chart = chart_xml,
+    )
+}
+
+/// A SmartArt frame: same skeleton as [`chart_frame`], but the graphic data
+/// is a `dgm:relIds` element pointing at the four diagram parts. The `dgm`
+/// prefix is declared on the element itself, the way PowerPoint writes it.
+fn diagram_frame(id: u32, name: &str, at: &Rect, dm: &str, lo: &str, qs: &str, cs: &str) -> String {
+    format!(
+        concat!(
+            "<p:graphicFrame>",
+            "<p:nvGraphicFramePr><p:cNvPr id=\"{id}\" name=\"{name}\"/>",
+            "<p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>",
+            "<p:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></p:xfrm>",
+            "<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/diagram\">",
+            "<dgm:relIds xmlns:dgm=\"http://schemas.openxmlformats.org/drawingml/2006/diagram\"",
+            " xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"",
+            " r:dm=\"{dm}\" r:lo=\"{lo}\" r:qs=\"{qs}\" r:cs=\"{cs}\"/>",
+            "</a:graphicData></a:graphic>",
+            "</p:graphicFrame>"
+        ),
+        id = id,
+        name = parts::esc_attr(name),
+        x = at.x,
+        y = at.y,
+        cx = at.cx,
+        cy = at.cy,
+        dm = parts::esc_attr(dm),
+        lo = parts::esc_attr(lo),
+        qs = parts::esc_attr(qs),
+        cs = parts::esc_attr(cs),
     )
 }
 
