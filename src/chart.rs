@@ -102,6 +102,218 @@ pub(crate) fn chart_xml_part(blob: &ChartBlob) -> Option<&ChartPart> {
         })
 }
 
+/// Mutable twin of [`chart_xml_part`], for the writer's re-authoring pass.
+pub(crate) fn chart_xml_part_mut(blob: &mut ChartBlob) -> Option<&mut ChartPart> {
+    let idx = blob
+        .parts
+        .iter()
+        .position(|p| p.content_type.contains("chart+xml"))
+        .or_else(|| {
+            blob.parts.iter().position(|p| {
+                p.path.contains("/charts/")
+                    && p.path.ends_with(".xml")
+                    && !p.path.ends_with(".rels")
+            })
+        })?;
+    blob.parts.get_mut(idx)
+}
+
+/// Re-author a captured chart part from edited [`ChartData`].
+///
+/// The rewrite is surgical, not a from-scratch serialisation: every event
+/// outside a series' `c:tx` / `c:cat` / `c:val` sections passes through
+/// byte-for-byte — axes, titles, formatting, the external-data reference —
+/// and inside those sections only the *caches* (`strCache` / `numCache` with
+/// their `ptCount` and `pt` entries) are regenerated from the data. That is
+/// exactly what a consumer displays, so the edited numbers show up when the
+/// chart opens; the embedded workbook still holds the original values until
+/// PowerPoint recalculates it.
+///
+/// Series are paired by index. A series the data no longer has is dropped;
+/// data series beyond what the XML carries cannot be created reliably (their
+/// workbook references would have to be invented) and are ignored.
+pub fn rewrite_chart_xml(xml: &str, data: &ChartData) -> String {
+    #[inline]
+    fn raw(bytes: &[u8]) -> &str {
+        std::str::from_utf8(bytes).unwrap_or("")
+    }
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut out = String::with_capacity(xml.len() + 64);
+
+    let mut ser_index: i64 = -1;
+    // Suppression state: the local name whose End closes the span, and the
+    // nesting depth inside it (1 = the span's own Start was consumed).
+    let mut suppress: Option<(&'static str, usize)> = None;
+    // The XML that replaces the suppressed span when it closes.
+    let mut replacement = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                let local = local_name(e.name());
+                if let Some((_, depth)) = &mut suppress {
+                    *depth += 1;
+                    continue;
+                }
+                if local == "ser" {
+                    ser_index += 1;
+                    if ser_index as usize >= data.series.len() {
+                        // The data dropped this series: suppress it whole.
+                        suppress = Some(("ser", 1));
+                        replacement.clear();
+                        continue;
+                    }
+                } else if ser_index >= 0 {
+                    let ser = &data.series[ser_index as usize];
+                    // Only direct series sections are re-authored; the same
+                    // local names elsewhere (the chart title's c:tx, say) sit
+                    // outside any ser and never reach this branch.
+                    let section: Option<(&'static str, String)> = match local.as_str() {
+                        "tx" => Some(("tx", tx_section(ser))),
+                        "cat" => Some(("cat", str_cache_section("cat", &ser.categories))),
+                        "val" => Some(("val", num_cache_section("val", &ser.values))),
+                        // Scatter: the decoder maps x to categories and y to
+                        // values, so the rewrite mirrors that back.
+                        "xVal" => Some((
+                            "xVal",
+                            num_cache_section("xVal", &cats_as_nums(&ser.categories)),
+                        )),
+                        "yVal" => Some(("yVal", num_cache_section("yVal", &ser.values))),
+                        _ => None,
+                    };
+                    if let Some((until, xml)) = section {
+                        suppress = Some((until, 1));
+                        replacement = xml;
+                        continue;
+                    }
+                }
+                out.push('<');
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push('>');
+            }
+            Ok(Event::End(e)) => {
+                let local = local_name(e.name());
+                if let Some((until, depth)) = &mut suppress {
+                    if local == *until && *depth == 1 {
+                        suppress = None;
+                        out.push_str(&replacement);
+                        replacement.clear();
+                    } else {
+                        *depth = depth.saturating_sub(1);
+                    }
+                    continue;
+                }
+                out.push_str("</");
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push('>');
+            }
+            Ok(Event::Empty(e)) => {
+                if suppress.is_none() {
+                    out.push('<');
+                    out.push_str(raw(e.as_ref().as_bytes()));
+                    out.push_str("/>");
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if suppress.is_none() {
+                    out.push_str(raw(e.as_ref().as_bytes()));
+                }
+            }
+            Ok(Event::Comment(e)) => {
+                out.push_str("<!--");
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push_str("-->");
+            }
+            Ok(Event::CData(e)) => {
+                out.push_str("<![CDATA[");
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push_str("]]>");
+            }
+            Ok(Event::Decl(e)) => {
+                out.push_str("<?");
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push_str("?>");
+            }
+            Ok(Event::PI(e)) => {
+                out.push_str("<?");
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push_str("?>");
+            }
+            Ok(Event::DocType(e)) => {
+                out.push_str("<!");
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push('>');
+            }
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// The `c:tx` section: the series legend text. A nameless series drops the
+/// section entirely — PowerPoint then shows its default "Series N".
+fn tx_section(ser: &ChartSeries) -> String {
+    match &ser.name {
+        Some(name) if !name.trim().is_empty() => format!(
+            "<c:tx><c:strRef><c:strCache><c:ptCount val=\"1\"/>\
+             <c:pt idx=\"0\"><c:v>{}</c:v></c:pt></c:strCache></c:strRef></c:tx>",
+            crate::parts::esc(name)
+        ),
+        _ => String::new(),
+    }
+}
+
+/// A `c:cat` section with a fresh string cache.
+fn str_cache_section(section: &str, categories: &[String]) -> String {
+    let mut s = format!(
+        "<c:{section}><c:strRef><c:strCache><c:ptCount val=\"{}\"/>",
+        categories.len()
+    );
+    for (i, cat) in categories.iter().enumerate() {
+        s.push_str(&format!(
+            "<c:pt idx=\"{i}\"><c:v>{}</c:v></c:pt>",
+            crate::parts::esc(cat)
+        ));
+    }
+    s.push_str("</c:strCache></c:strRef></c:");
+    s.push_str(section);
+    s.push('>');
+    s
+}
+
+/// A numeric cache section (`c:val` / `c:xVal` / `c:yVal`). A `None` is an
+/// empty `<c:v/>` — a gap, exactly as the decoder reads it back.
+fn num_cache_section(section: &str, values: &[Option<f64>]) -> String {
+    let mut s = format!(
+        "<c:{section}><c:numRef><c:numCache><c:formatCode>General</c:formatCode>\
+         <c:ptCount val=\"{}\"/>",
+        values.len()
+    );
+    for (i, v) in values.iter().enumerate() {
+        match v {
+            Some(v) => s.push_str(&format!(
+                "<c:pt idx=\"{i}\"><c:v>{}</c:v></c:pt>",
+                format_number(*v)
+            )),
+            None => s.push_str(&format!("<c:pt idx=\"{i}\"><c:v></c:v></c:pt>")),
+        }
+    }
+    s.push_str("</c:numCache></c:numRef></c:");
+    s.push_str(section);
+    s.push('>');
+    s
+}
+
+/// Scatter x values live in the category slots; parse them back to numbers.
+fn cats_as_nums(categories: &[String]) -> Vec<Option<f64>> {
+    categories.iter().map(|c| c.trim().parse().ok()).collect()
+}
+
 /// Decode a `c:chartSpace` document into [`ChartData`].
 ///
 /// Returns `None` when the XML is unreadable or carries no series — there is
@@ -434,5 +646,67 @@ mod tests {
         };
         let data = decode_blob(&blob).expect("decodes");
         assert_eq!(data.series.len(), 2);
+    }
+
+    #[test]
+    fn rewriting_with_the_same_data_preserves_everything_but_the_caches() {
+        let data = decode(BAR).expect("decodes");
+        let rewritten = rewrite_chart_xml(BAR, &data);
+        // The scaffolding survives; only the caches were regenerated (and
+        // they say the same thing, in the same numbers).
+        assert!(rewritten.contains("<c:barChart>"), "{rewritten}");
+        assert!(rewritten.contains("Revenue vs Cost"), "{rewritten}");
+        assert!(rewritten.contains("<c:v>1.5</c:v>"), "{rewritten}");
+        assert_eq!(rewritten.matches("<c:ser>").count(), 2, "{rewritten}");
+        // Round-trip stable: decoding the rewrite yields the same data.
+        assert_eq!(decode(&rewritten).as_ref(), Some(&data));
+    }
+
+    #[test]
+    fn edited_numbers_land_in_the_cache() {
+        let mut data = decode(BAR).expect("decodes");
+        data.series[0].values[2] = Some(4.1);
+        data.series[0].categories[0] = "H1".into();
+        let rewritten = rewrite_chart_xml(BAR, &data);
+        assert!(rewritten.contains("<c:v>4.1</c:v>"), "{rewritten}");
+        assert!(rewritten.contains("<c:v>H1</c:v>"), "{rewritten}");
+        // A value that was not edited is still there.
+        assert!(rewritten.contains("<c:v>2.5</c:v>"), "{rewritten}");
+        // And the round trip through the decoder agrees with the edit.
+        let back = decode(&rewritten).expect("decodes");
+        assert_eq!(back.series[0].values, vec![Some(1.5), Some(2.5), Some(4.1)]);
+        assert_eq!(back.series[0].categories[0], "H1");
+    }
+
+    #[test]
+    fn a_dropped_series_disappears_from_the_xml() {
+        let mut data = decode(BAR).expect("decodes");
+        data.series.truncate(1);
+        let rewritten = rewrite_chart_xml(BAR, &data);
+        assert_eq!(rewritten.matches("<c:ser>").count(), 1, "{rewritten}");
+        assert!(!rewritten.contains("<c:v>Cost</c:v>"), "{rewritten}");
+        assert_eq!(decode(&rewritten).expect("decodes").series.len(), 1);
+    }
+
+    #[test]
+    fn a_gap_rewrites_as_an_empty_cell() {
+        let data = decode(BAR).expect("decodes");
+        let rewritten = rewrite_chart_xml(BAR, &data);
+        // Cost's Q2 is None in the source and must stay an empty <c:v/>.
+        assert!(
+            rewritten.contains("<c:pt idx=\"1\"><c:v></c:v></c:pt>"),
+            "{rewritten}"
+        );
+    }
+
+    #[test]
+    fn the_chart_title_outside_any_ser_is_untouched() {
+        let mut data = decode(BAR).expect("decodes");
+        data.series[0].name = Some("Renamed".into());
+        let rewritten = rewrite_chart_xml(BAR, &data);
+        // The series name changed…
+        assert!(rewritten.contains("<c:v>Renamed</c:v>"), "{rewritten}");
+        // …but the chart's own title did not.
+        assert!(rewritten.contains(">Revenue vs Cost</a:t>"), "{rewritten}");
     }
 }

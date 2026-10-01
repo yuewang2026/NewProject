@@ -182,6 +182,40 @@ fn markdown_export_carries_the_diagram_texts() {
 }
 
 #[test]
+fn edited_texts_survive_a_write_and_reopen() {
+    let (block, _) = diagram_block();
+    let mut edited = deck_from_blocks(block);
+    let texts = edited
+        .slides
+        .iter_mut()
+        .flat_map(|s| &mut s.blocks)
+        .find(|b| b.role == Role::Diagram)
+        .and_then(|b| match &mut b.content {
+            BlockContent::Diagram { texts, .. } => Some(texts),
+            _ => None,
+        })
+        .expect("a diagram with texts");
+    texts[2] = "Deliver".to_string();
+
+    let path = std::env::temp_dir().join(format!("deckr-diagram-edit-{}.pptx", std::process::id()));
+    deckr::write_pptx_file(&edited, &path).expect("writes");
+    let back = read_pptx(&path).expect("re-opens");
+    let _ = std::fs::remove_file(&path);
+
+    let back_texts = back
+        .slides
+        .iter()
+        .flat_map(|s| &s.blocks)
+        .find(|b| b.role == Role::Diagram)
+        .and_then(|b| match &b.content {
+            BlockContent::Diagram { texts, .. } => Some(texts),
+            _ => None,
+        })
+        .expect("diagram texts after the rebuild");
+    assert_eq!(back_texts, &["Collect", "Convert", "Deliver"]);
+}
+
+#[test]
 fn diff_reports_a_reworded_node_and_a_restructure() {
     let (block, deck) = diagram_block();
 

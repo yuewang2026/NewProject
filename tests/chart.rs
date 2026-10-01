@@ -155,6 +155,73 @@ fn a_changed_number_is_diffed_at_point_level() {
 }
 
 #[test]
+fn edited_numbers_survive_a_write_and_reopen() {
+    let deck = read_pptx(&ensure_sample()).expect("reads");
+    let mut edited = deck.clone();
+    let chart = edited
+        .slides
+        .iter_mut()
+        .flat_map(|s| &mut s.blocks)
+        .find(|b| b.role == Role::Chart)
+        .and_then(|b| match &mut b.content {
+            BlockContent::Chart { data, .. } => data.as_mut(),
+            _ => None,
+        })
+        .expect("a chart with decoded data");
+    chart.series[0].values[2] = Some(4.1);
+    chart.series[0].name = Some("Net revenue".into());
+
+    let path = std::env::temp_dir().join(format!("deckr-chart-edit-{}.pptx", std::process::id()));
+    deckr::write_pptx_file(&edited, &path).expect("writes");
+    let back = read_pptx(&path).expect("re-opens");
+    let _ = std::fs::remove_file(&path);
+
+    let back_data = back
+        .slides
+        .iter()
+        .flat_map(|s| &s.blocks)
+        .find(|b| b.role == Role::Chart)
+        .and_then(|b| b.as_chart_data())
+        .expect("chart data decoded after the rebuild");
+    assert_eq!(
+        back_data.series[0].values,
+        vec![Some(1.5), Some(2.5), Some(4.1)]
+    );
+    assert_eq!(back_data.series[0].name.as_deref(), Some("Net revenue"));
+    // The untouched series is exactly as it was.
+    assert_eq!(back_data.series[1].values, vec![Some(1.1), None, Some(3.9)]);
+}
+
+/// An unedited deck must still round-trip byte-identically: re-authoring
+/// kicks in only when the decoded view has drifted from the captured bytes.
+#[test]
+fn an_unedited_chart_still_round_trips_verbatim() {
+    let deck = read_pptx(&ensure_sample()).expect("reads");
+    let original = deck
+        .slides
+        .iter()
+        .flat_map(|s| &s.blocks)
+        .find(|b| b.role == Role::Chart)
+        .and_then(|b| b.as_chart_data())
+        .cloned()
+        .expect("chart data");
+
+    let path = std::env::temp_dir().join(format!("deckr-chart-same-{}.pptx", std::process::id()));
+    deckr::write_pptx_file(&deck, &path).expect("writes");
+    let back = read_pptx(&path).expect("re-opens");
+    let _ = std::fs::remove_file(&path);
+
+    let back_data = back
+        .slides
+        .iter()
+        .flat_map(|s| &s.blocks)
+        .find(|b| b.role == Role::Chart)
+        .and_then(|b| b.as_chart_data())
+        .expect("chart data after rebuild");
+    assert_eq!(*back_data, original);
+}
+
+#[test]
 fn a_series_added_or_removed_is_named() {
     ensure_sample();
     let old = read_pptx(&sample_path()).expect("reads");

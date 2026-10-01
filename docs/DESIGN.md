@@ -215,7 +215,7 @@ a chart is a faithful, byte-exact copy that *also* answers "what did it say".
 | Read chart numbers | **Shipped in 0.4** — `ChartBlob` → `ChartData`: series × categories → values decoded from the captured chart XML; feeds Markdown, diff and render | 0.4 |
 | Semantic diff between decks | **Shipped in 0.4** — `deckr diff` compares the IRs: slides by position, blocks by role, text paragraph by paragraph, tables cell by cell | 0.4 |
 | Write diagrams (SmartArt) back | **Shipped in 0.4** — the whole `dgm:` subgraph is captured verbatim and rebuilt like a chart's; text points decode into the IR | 0.4 |
-| Re-author charts/diagrams from edited numbers or text | Verbatim re-emission loses nothing; re-serialising a valid `c:chartSpace`/`dgm:dataModel` from scratch is a phase of its own | later |
+| Re-author charts/diagrams from edited numbers or text | **Shipped in 0.4** — the writer rewrites only the caches (`strCache`/`numCache`, `dgm:t`) when the decoded view has drifted from the captured bytes; unedited round trips stay byte-identical. Workbook recalculation and brand-new series/points are deliberately out of scope | 0.4 |
 | Notes, animations, audio/video | Real, but lower value per line of code now that picture + chart + diagram media round-trip | later |
 
 ## Crate layout (today)

@@ -528,19 +528,53 @@ fn slide_xml<C: Chrome>(
                 slide.index + 1
             )),
             // A chart with its captured subgraph is re-emitted verbatim;
-            // without one it stays unplaceable.
+            // without one it stays unplaceable. When the caller edited the
+            // decoded numbers, the captured chart part's caches are
+            // re-authored from them — everything else stays verbatim.
             BlockContent::Chart {
-                blob: Some(blob), ..
-            } => charts.push(blob.clone()),
+                blob: Some(blob),
+                data,
+                ..
+            } => {
+                let mut blob = blob.clone();
+                if let Some(provided) = data {
+                    if let Some(decoded) = crate::chart::decode_blob(&blob) {
+                        if provided != &decoded {
+                            if let Some(part) = crate::chart::chart_xml_part_mut(&mut blob) {
+                                let xml = String::from_utf8_lossy(&part.bytes).to_string();
+                                part.bytes =
+                                    crate::chart::rewrite_chart_xml(&xml, provided).into_bytes();
+                            }
+                        }
+                    }
+                }
+                charts.push(blob);
+            }
             BlockContent::Chart { blob: None, .. } => report.skipped.push(format!(
                 "slide {}: chart has no captured part to write back",
                 slide.index + 1
             )),
             // A diagram with its captured subgraph is re-emitted verbatim,
-            // exactly like a chart; without one it stays unplaceable.
+            // exactly like a chart; edited text points re-author the data
+            // model's text subtrees, everything else stays verbatim.
             BlockContent::Diagram {
-                blob: Some(blob), ..
-            } => diagrams.push(blob.clone()),
+                blob: Some(blob),
+                texts,
+                ..
+            } => {
+                let mut blob = blob.clone();
+                if let Some(part) = blob
+                    .parts
+                    .iter_mut()
+                    .find(|p| p.content_type.contains("diagramData"))
+                {
+                    let xml = String::from_utf8_lossy(&part.bytes).to_string();
+                    if crate::ooxml::decode_diagram_texts(&xml) != *texts {
+                        part.bytes = crate::ooxml::rewrite_diagram_data(&xml, texts).into_bytes();
+                    }
+                }
+                diagrams.push(blob);
+            }
             BlockContent::Diagram { blob: None, .. } => report.skipped.push(format!(
                 "slide {}: diagram has no captured part to write back",
                 slide.index + 1

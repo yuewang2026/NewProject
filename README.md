@@ -111,10 +111,18 @@ placeholders, page furniture, per-run formatting (bold, italic, underline,
 strike, size, colour, hyperlinks), **and slide order as the author intended
 it** rather than as filenames sort it.
 
-Still missing, deliberately: writing charts back from edited numbers (the
-chart is still re-emitted verbatim — deckr cannot yet re-author a chart's
-data), and re-authoring diagrams from edited text (same story: the subgraph is
-re-emitted verbatim).
+And the decoded views are not just read-only: **edit them and the writer
+re-authors the file.** Change a chart's `ChartData` (a value, a category, a
+series name, drop a series) and the writer rewrites the captured chart's
+`strCache`/`numCache` — axes, titles and formatting stay byte-for-byte. Change
+a diagram's `texts` and the data model's text points are rewritten in place.
+An unedited round trip stays byte-identical; re-authoring kicks in only when
+the decoded view has drifted from the captured bytes.
+
+Still missing, deliberately: the embedded workbook inside a rewritten chart
+still carries the original values until PowerPoint recalculates it, and
+adding *brand-new* series or diagram points means inventing workbook
+references and model ids, which deckr refuses to fake.
 
 ### Templates: your theme, not ours
 
@@ -463,8 +471,14 @@ Markdown 导出与 diff 使用）、空占位符、页眉页码等页面装饰�
 下划线、删除线、字号、颜色、超链接），**以及作者真正想要的页序**，而不是文件名
 排序的页序。
 
-有意暂缺：用改过的数字把图表*写回*（图表仍然原样重发 —— deckr 尚不能重新编辑
-图表数据）、从改过的文本重新生成图示（同样原样重发）。
+而且解码出的视图**不是只读的：改了它们，writer 就会重新生成文件**。改图表的
+`ChartData`（数值、类目、序列名、删序列），writer 会重写捕获图表的
+`strCache`/`numCache` —— 坐标轴、标题、格式逐字节保留。改图示的 `texts`，数据
+模型的文本点会被原位重写。未编辑的往返依旧字节级不变；只有当解码视图与捕获
+字节发生漂移时，重新生成才会启动。
+
+有意暂缺：被重写的图表里内嵌工作簿仍是旧值，直到 PowerPoint 重新计算；新增
+*全新的*序列或图示节点意味着凭空编造工作簿引用与模型 id，deckr 拒绝这么做。
 
 ### 模板：用你的主题，不是我们的
 

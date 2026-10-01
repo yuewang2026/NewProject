@@ -445,7 +445,7 @@ fn capture_diagram_subgraph(
 /// A `dgm:pt` carries its text inside `dgm:t`, whose paragraphs are ordinary
 /// DrawingML (`a:p > a:r > a:t`). Runs within one point join; points stay
 /// separate entries. Empty points (the `doc` root, layout stubs) yield nothing.
-fn decode_diagram_texts(xml: &str) -> Vec<String> {
+pub(crate) fn decode_diagram_texts(xml: &str) -> Vec<String> {
     let mut reader = XmlReader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -1197,6 +1197,137 @@ fn shape_kind(local: &str) -> Option<ShapeKind> {
         "graphicFrame" => Some(ShapeKind::GraphicFrame),
         _ => None,
     }
+}
+
+/// Re-author a captured diagram data model from edited [`texts`]
+/// (`crate::ir::Diagram.texts`).
+///
+/// Surgical, like the chart rewrite: everything outside a text point's
+/// `dgm:t` subtree passes through byte-for-byte (connections, layout hints,
+/// the drawing reference), and only the text subtrees of the points that
+/// carry text are replaced. Text points are paired with `texts` by document
+/// order — the same order [`decode_diagram_texts`] reads them back in. Points
+/// beyond the provided texts keep their original words; texts beyond the
+/// model's points are ignored (creating points would mean inventing model ids
+/// and connections).
+pub(crate) fn rewrite_diagram_data(xml: &str, texts: &[String]) -> String {
+    #[inline]
+    fn raw(bytes: &[u8]) -> &str {
+        std::str::from_utf8(bytes).unwrap_or("")
+    }
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    let mut out = String::with_capacity(xml.len() + 64);
+
+    let mut pt_depth = 0usize;
+    let mut t_depth = 0usize;
+    let mut text_pts = 0usize;
+    // While suppressing a `dgm:t`, the index of the point it belongs to.
+    let mut suppress: Option<usize> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                let local = local_name(e.name());
+                match local.as_str() {
+                    "pt" => pt_depth += 1,
+                    "t" if pt_depth > 0 => {
+                        t_depth += 1;
+                        if t_depth == 1 {
+                            // The point's own dgm:t opened: this is a
+                            // text-bearing point.
+                            let idx = text_pts;
+                            text_pts += 1;
+                            if idx < texts.len() {
+                                suppress = Some(idx);
+                                out.push_str(&format!(
+                                    "<dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{}</a:t></a:r></a:p></dgm:t>",
+                                    crate::parts::esc(&texts[idx])
+                                ));
+                                continue;
+                            }
+                        }
+                        // Nested a:t (or an unrewritten point): passthrough.
+                    }
+                    _ => {}
+                }
+                if suppress.is_none() {
+                    out.push('<');
+                    out.push_str(raw(e.as_ref().as_bytes()));
+                    out.push('>');
+                }
+            }
+            Ok(Event::End(e)) => {
+                let local = local_name(e.name());
+                match local.as_str() {
+                    "pt" => {
+                        pt_depth -= 1;
+                        if t_depth > 0 {
+                            // The point closed with its dgm:t still open.
+                            t_depth = 0;
+                            suppress = None;
+                        }
+                    }
+                    "t" if t_depth > 0 => {
+                        t_depth -= 1;
+                        if t_depth == 0 {
+                            // The point's own dgm:t closed. When it was
+                            // rewritten, the replacement above already carries
+                            // the closing tag — swallow this End too.
+                            let was_suppressed = suppress.take().is_some();
+                            if !was_suppressed {
+                                out.push_str("</");
+                                out.push_str(raw(e.as_ref().as_bytes()));
+                                out.push('>');
+                            }
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+                if suppress.is_none() {
+                    out.push_str("</");
+                    out.push_str(raw(e.as_ref().as_bytes()));
+                    out.push('>');
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if suppress.is_none() {
+                    out.push('<');
+                    out.push_str(raw(e.as_ref().as_bytes()));
+                    out.push_str("/>");
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if suppress.is_none() {
+                    out.push_str(raw(e.as_ref().as_bytes()));
+                }
+            }
+            Ok(Event::Comment(e)) => {
+                out.push_str("<!--");
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push_str("-->");
+            }
+            Ok(Event::Decl(e)) => {
+                out.push_str("<?");
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push_str("?>");
+            }
+            Ok(Event::PI(e)) => {
+                out.push_str("<?");
+                out.push_str(raw(e.as_ref().as_bytes()));
+                out.push_str("?>");
+            }
+            Err(_) => break,
+            // CData, DocType, GeneralRef and the rest never appear in a
+            // diagram data model; anything unexpected is dropped.
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
 }
 
 #[cfg(test)]

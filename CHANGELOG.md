@@ -221,15 +221,34 @@ headings inside it mark the phases, not releases.
   before). The fixture now ships a real three-node diagram, so all of the
   above is tested against an actual SmartArt in CI.
 
+### Added — re-authoring from edited views (0.4)
+
+- **Edit the decoded view, and the writer re-authors the file.** The writer
+  compares the caller's `ChartData` / `Diagram.texts` against what the
+  captured blob decodes to; when they have drifted, the affected part is
+  rewritten — surgically. Chart: only the `c:tx` / `c:cat` / `c:val` /
+  `c:xVal` / `c:yVal` caches (`strCache` / `numCache`, `ptCount`, `pt` entries)
+  are regenerated; axes, titles, formatting and the external-data reference
+  pass through byte-for-byte, and a series the data dropped is removed from
+  the XML. Diagram: only the text points' `dgm:t` subtrees are replaced, in
+  document order. An unedited round trip stays byte-identical.
+- Known edges, stated plainly: the embedded workbook inside a rewritten chart
+  still carries the original values until PowerPoint recalculates it; adding
+  brand-new series or diagram points is refused (it would mean inventing
+  workbook references and model ids).
+- New public API: `chart::rewrite_chart_xml`; the writer-side drift detection
+  uses the existing decoders, so what you edit is exactly what is compared.
+- Covered by 5 unit tests (fidelity, edited values/categories, dropped
+  series, gap representation, title isolation) and 3 integration tests
+  (edited chart numbers and diagram text survive a write and reopen; the
+  unedited round trip stays verbatim).
+
 ### Known limitations
 
-- Charts are read (their numbers now decode into the IR) but still written
-  back **verbatim** — deckr cannot yet re-author a chart from edited numbers.
-  Nothing is lost on the way through, but editing a chart's data is not
-  possible yet.
-- Diagrams round-trip verbatim with their text points decoded, but deckr
-  cannot yet re-author a diagram from edited text (the subgraph is re-emitted
-  as captured).
+- Charts and diagrams re-author their *caches* from edited views, but the
+  embedded workbook inside a rewritten chart still holds the original values
+  until PowerPoint recalculates it, and brand-new series/points are not
+  synthesised.
 - Notes, animations, speaker notes masters and media beyond pictures are ignored.
 
 [Unreleased]: https://github.com/yuewang2026/deckr-pptx-oxide/compare/v0.1.0...HEAD
