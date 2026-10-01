@@ -76,3 +76,23 @@ Releases are cut by hand, and the workflow only does the upload:
 To publish from a machine instead, `cargo login` once and run
 `cargo publish --locked`. Either way the crate must build with `--locked`, so
 `Cargo.lock` is committed.
+
+### Trusted publishing (no stored token)
+
+crates.io has no web upload: the first release of a crate name always needs an
+API token. After that, publishing can be **credential-free** via OIDC —
+GitHub Actions swaps its own identity for a short-lived crates.io token that is
+revoked when the job ends, so no `CARGO_REGISTRY_TOKEN` secret is needed.
+
+One-time setup, once `deckr` exists on crates.io:
+
+1. Open <https://crates.io/crates/deckr/settings/new-trusted-publisher>.
+2. Fill in: Repository owner `yuewang2026`, Repository name
+   `deckr-pptx-oxide`, Workflow filename `release.yml` (the filename only, not
+   the path), Environment **leave empty**.
+3. Save. From then on, `.github/workflows/release.yml` publishes on a tag with
+   no secret at all — the `CARGO_REGISTRY_TOKEN` secret can be deleted.
+
+Optionally turn on "Trusted Publishing Only" in the crate settings afterwards:
+that disables token publishing for the crate entirely, so a leaked long-lived
+token cannot be used against it.
