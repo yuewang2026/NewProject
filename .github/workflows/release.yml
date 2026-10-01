@@ -1,0 +1,36 @@
+name: Release
+
+# Publishing is deliberately manual: bump the version in Cargo.toml, move the
+# CHANGELOG heading, tag, push. The workflow only carries out the upload, and
+# only for a tag, so nothing reaches crates.io by accident.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The fixture is generated, not committed, so regenerate before testing.
+      - name: Generate the test fixture
+        run: python3 tests/fixtures/make_sample_pptx.py tests/fixtures/sample.pptx
+
+      # A tag that does not pass the same suite CI runs must not publish.
+      - name: Test
+        run: cargo test --all-targets
+      - name: Package (verifies the .crate builds on its own)
+        run: cargo package --locked
+
+      - name: Publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

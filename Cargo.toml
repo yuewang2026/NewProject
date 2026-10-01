@@ -12,6 +12,21 @@ homepage = "https://github.com/yuewang2026/deckr-pptx-oxide"
 documentation = "https://docs.rs/deckr"
 keywords = ["pptx", "powerpoint", "ooxml", "presentation", "document"]
 categories = ["command-line-utilities", "parser-implementations", "text-processing"]
+# The published .crate carries what a consumer needs to build, test and audit
+# deckr — sources, tests, the design notes — and nothing else. Build output and
+# CI configuration stay out; the generated fixture is gitignored anyway, since
+# every test regenerates it from `make_sample_pptx.py`.
+include = [
+    "src/**/*",
+    "tests/*.rs",
+    "tests/fixtures/*.py",
+    "examples/**/*",
+    "docs/**/*",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+]
 
 [dependencies]
 # `default-features = false` drops clap's `color` support, which is what drags

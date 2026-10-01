@@ -60,3 +60,19 @@ CI runs all of the above on Linux, macOS and Windows.
 Imperative mood, one logical change per commit. No "wip". No AI-coauthored
 trailers on every line — use them if the contribution is AI-assisted, otherwise
 keep it clean.
+
+## Releasing
+
+Releases are cut by hand, and the workflow only does the upload:
+
+1. Bump `version` in `Cargo.toml` (this project follows SemVer).
+2. Move the CHANGELOG's `Unreleased` heading to a dated `## [x.y.z] — YYYY-MM-DD`
+   and update the link at the bottom of the file.
+3. Commit, then tag and push: `git tag v0.1.0 && git push origin main --tags`.
+4. Pushing the tag runs `.github/workflows/release.yml`, which re-runs the
+   suite, verifies the `.crate` builds, and publishes with
+   `CARGO_REGISTRY_TOKEN` (a repository secret).
+
+To publish from a machine instead, `cargo login` once and run
+`cargo publish --locked`. Either way the crate must build with `--locked`, so
+`Cargo.lock` is committed.

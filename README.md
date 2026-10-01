@@ -5,6 +5,8 @@
 **Read, write and account for PowerPoint decks — without PowerPoint, without LibreOffice, without Python.**
 
 [![CI](https://github.com/yuewang2026/deckr-pptx-oxide/actions/workflows/ci.yml/badge.svg)](https://github.com/yuewang2026/deckr-pptx-oxide/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/deckr.svg)](https://crates.io/crates/deckr)
+[![docs.rs](https://img.shields.io/docsrs/deckr)](https://docs.rs/deckr)
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
 
@@ -182,13 +184,20 @@ dropped its caption. Both came from running against a real file.
 ## Install
 
 ```sh
+cargo install deckr          # from crates.io
+deckr --help
+```
+
+Or build it from source:
+
+```sh
 git clone https://github.com/yuewang2026/deckr-pptx-oxide
 cd deckr-pptx-oxide
 cargo build --release
 # target/release/deckr
 ```
 
-Not yet published to crates.io — say the word in an issue and we will cut 0.1.0.
+As a library: `cargo add deckr` (MIT, five-ish dependencies, no native deps).
 
 ## CLI
 
@@ -370,6 +379,8 @@ MIT — see [LICENSE](LICENSE).
 **读取、写回、并交代清楚每一页 PowerPoint —— 不需要装 PowerPoint，不需要 LibreOffice，也不需要 Python。**
 
 [![CI](https://github.com/yuewang2026/deckr-pptx-oxide/actions/workflows/ci.yml/badge.svg)](https://github.com/yuewang2026/deckr-pptx-oxide/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/deckr.svg)](https://crates.io/crates/deckr)
+[![docs.rs](https://img.shields.io/docsrs/deckr)](https://docs.rs/deckr)
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)
 
@@ -533,13 +544,20 @@ bugfix：相邻 run 之间的空格被吞掉了；以及「标题 + 副标题 + 
 ## 安装
 
 ```sh
+cargo install deckr          # 从 crates.io 安装
+deckr --help
+```
+
+或者从源码构建：
+
+```sh
 git clone https://github.com/yuewang2026/deckr-pptx-oxide
 cd deckr-pptx-oxide
 cargo build --release
 # target/release/deckr
 ```
 
-还没发布到 crates.io —— 在 issue 里说一声，我们就发 0.1.0。
+作为库使用：`cargo add deckr`（MIT，依赖极少，无原生依赖）。
 
 ## 命令行
 

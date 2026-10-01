@@ -5,10 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Nothing has been tagged yet, so everything lives under Unreleased. The two
-headings inside it mark the phases, not releases.
+## [0.1.0] — 2026-10-01
 
-## [Unreleased]
+The first release: reading and writing are both real, and every number deckr
+reports is measured rather than claimed. Everything below was previously
+listed under Unreleased; the phase headings mark the work, not releases.
 
 ### Added — the reading half
 
@@ -250,5 +251,11 @@ headings inside it mark the phases, not releases.
   until PowerPoint recalculates it, and brand-new series/points are not
   synthesised.
 - Notes, animations, speaker notes masters and media beyond pictures are ignored.
+
+[0.1.0]: https://github.com/yuewang2026/deckr-pptx-oxide/releases/tag/v0.1.0
+
+## [Unreleased]
+
+Nothing yet — the roadmap lives in [docs/DESIGN.md](docs/DESIGN.md).
 
 [Unreleased]: https://github.com/yuewang2026/deckr-pptx-oxide/compare/v0.1.0...HEAD
